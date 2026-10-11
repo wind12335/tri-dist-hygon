@@ -1,6 +1,6 @@
 # tri-dist-hygon
 
-[triton-dist](https://github.com/bytedance/triton-dist) 的 Hygon DCU（海光）移植 —— 单机多卡 allgather+GEMM 与 GEMM+reduce-scatter 融合内核，基于 DTK 的 DUSHMEM（NVSHMEM 3.2.5 fork）单边通信。
+[triton-dist](https://github.com/bytedance/triton-dist) 的 Hygon DCU（海光）移植 —— 单机多卡 allgather+GEMM、GEMM+reduce-scatter、GEMM+allreduce 融合内核，基于 DTK 的 DUSHMEM（NVSHMEM 3.2.5 fork）单边通信。
 
 这是**研究代码**，用于 skew-aware 调度 / 通信-计算重叠方向。完整的问题定位记录（传输带宽、缓存一致性模型、自旋病理学等）见 **[docs/DCU_PORT_FINDINGS_zh.md](docs/DCU_PORT_FINDINGS_zh.md)**。
 
@@ -50,6 +50,12 @@ from triton_dist.kernels.dcu import all_gather_gemm as ag
 ctx = ag.create_ag_gemm_intra_node_context(M, K, torch.float16, torch.float16,
                                            rank, world_size, mpi, comm)
 ag.ag_gemm_intra_node_op(a, B, c, ctx)      # C = allgather(A) @ B^T
+
+from triton_dist.kernels.dcu import gemm_allreduce as gar
+ctx2 = gar.create_gemm_ar_intra_node_context(M, N, torch.float16, torch.float16,
+                                             rank, world_size, mpi, comm,
+                                             M_PER_CHUNK=1024)
+c = gar.gemm_ar_intra_node(a, b, ctx2)      # C = sum_r a_r @ b_r^T（完整 C）
 ```
 
 退出前必须 `host.finalize() → MPI_Barrier → MPI_Finalize → os._exit(0)`（析构竞争会 SEGV）。
@@ -62,14 +68,17 @@ mpirun --allow-run-as-root -np 2 --oversubscribe --bind-to none \
   -mca coll ^hcoll -x HSA_FORCE_FINE_GRAIN_PCIE=1 \
   python3 tests/test_ag_gemm.py
 mpirun ... python3 tests/test_gemm_rs.py
+mpirun ... python3 tests/test_gemm_ar.py
 
 # 性能（含 torch.distributed RCCL 基线）→ bench/results/
-mpirun ... python3 bench/s4_bench.py
+mpirun ... python3 bench/s4_bench.py        # AG / RS
+mpirun ... python3 bench/s6_bench_gemm_ar.py  # GEMM+AR
 
-# 诊断 probe：传输微基准 / 引擎写一致性 / 尾延迟
+# 诊断 probe：传输微基准 / 引擎写一致性 / 尾延迟 / 设备原子并发
 mpirun ... python3 bench/s4_transport_probe.py
 mpirun ... python3 bench/probe_memcpy_freshness.py
 mpirun ... python3 bench/s4_rearm_probe.py
+mpirun ... python3 bench/s6_signal_concurrency.py
 ```
 
 ## 目录
@@ -85,9 +94,11 @@ docs/                      移植问题全记录（findings，创新点素材）
 ## 路线与边界
 
 - 路线：**纯 Python 层**——内核用 stock triton `extern_elementwise` 外链 DTK 设备位码，宿主侧 ctypes；不携带也不修改上游的 lib/include/plugin/csrc/dialect。
-- 上游 NVIDIA 层（low-latency allgather、EP a2a、flash-decode 等）未移植。
-- 生产者（push/scatter/barrier arrive）是**宿主侧编排**：数据走引擎 memcpy（DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s，findings P5），**信号走 RMA putmem**（小引擎写混进大数据写会偶发 ~1.6s 的队列排空悬崖，findings S5.3）——`all_gather_gemm.SIGNAL_MODE` 可切换。
-- GEMM tile 配置经扫参定型（`128×128×64/w4/s2`，findings S5.1）；AG consumer 每 tile 一个 block（findings S5.2）。
+- 已移植：AG+GEMM、GEMM+RS（旧上游 amd 层 1:1）、**GEMM+AR（新版上游 gemm_allreduce，按 DCU 平面重推导——上游的 per-tile 设备信号/扇出架构依赖编译器扩展且撞 19.5MB/s 设备管道天花板，findings S6）**。
+- 未移植：上游 NVIDIA 层与新版 amd 的 EP a2a / low-latency allgather / MoE（依赖 NVSHMEM 设备 API 完整面或编译器后端扩展）。
+- 生产者（push/scatter/barrier arrive）是**宿主侧编排**：数据走引擎 memcpy（DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s，findings P5），**信号走整行 RMA putmem**（小引擎写混进大数据写会偶发 ~1.6s 队列排空悬崖，findings S5.3；逐 chunk 的 8B blocking put 会互相死锁，findings S6.4）——`all_gather_gemm.SIGNAL_MODE` 可切换。
+- GEMM tile 配置经扫参定型（`128×128×64/w4/s2`，findings S5.1）；AG consumer 每 tile 一个 block（findings S5.2）；AR 的 chunk 粒度取 MPC=1024（findings S6.5）。
+- 自旋 consumer 不得与 producer GEMM 同时占满 SM（P9，AR 移植时复发过一次，findings S6.4）。
 
 ## License
 

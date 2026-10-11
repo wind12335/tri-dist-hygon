@@ -8,20 +8,21 @@
 
 ## 0. 功能覆盖现状
 
-上游 `triton_dist/kernels/amd/` 共 3 个内核文件，本移植（`kernels/dcu/`）**1:1 全部覆盖**并在 2 卡验证正确（fresh-data 3 迭代，max_diff ≤ 1e-4，干净退出）：
+上游 `triton_dist/kernels/amd/` 共 3 个内核文件，本移植（`kernels/dcu/`）**1:1 全部覆盖**并在 2 卡验证正确（fresh-data 3 迭代，max_diff ≤ 1e-4，干净退出）；S6 又从新版上游（triton-3.7 时代的 `gemm_allreduce.py`）移植了 gemm+allreduce：
 
 | 上游 (amd) | 本移植 (dcu) | 语义 | 验证 |
 |---|---|---|---|
 | `all_gather_gemm.py` | `all_gather_gemm.py` | allgather A + 本地 GEMM：`C = A_all @ B^T`，producer 推 shard、persistent consumer 按块到达顺序消费 | ✅ test_ag_gemm.py |
 | `gemm_reduce_scatter.py` | `gemm_reduce_scatter.py` | reduce-scatter over GEMM：`C_r = Σ_s (A_s@B_s^T)[rows_r]` | ✅ test_gemm_rs.py |
 | `common_ops.py` | `common_ops.py` | 初始化、对称堆 barrier、流式 wait/set 原语 | ✅（被上面两个测试覆盖） |
+| （新版上游）`gemm_allreduce.py` | `gemm_allreduce.py` | TP 列并行 GEMM + allreduce：`C = Σ_r a_r @ b_r^T`，每 rank 得完整 C | ✅ test_gemm_ar.py |
 
 新增基础设施（上游没有，DCU 栈必需）：
 
 - **pydushmem**：DUSHMEM 宿主 API 的 ctypes 绑定 + 设备端 wrapper 位码 + triton `extern_libs` 链接装置 + `llc` 直出修补。
-- **性能基准套件**（`bench/`）：传输微基准、一致性 probe、离群值/复发 probe、端到端 S4 基准（含 RCCL 基线）。
+- **性能基准套件**（`bench/`）：传输微基准、一致性 probe、离群值/复发 probe、端到端 S4 基准（含 RCCL 基线）、S6 信号并发 probe。
 
-上游 NVIDIA 层的其余能力（low-latency allgather、EP a2a、flash-decode、MoE rs、perf model 等）**未移植**——它们依赖 NVSHMEM 设备 API 的完整面，等 S4/S5 的性能路线明确后按需移植。
+上游 NVIDIA 层与其余 amd 能力（low-latency allgather、EP a2a、flash-decode、MoE rs、perf model 等）**未移植**——它们依赖 NVSHMEM 设备 API 的完整面或编译器后端扩展，按需再评估（见 §7 的移植性判断方法）。
 
 ## 1. 性能现状（2×BW1000，fp16，50 iter）
 
@@ -235,3 +236,60 @@ S4 遗留的 AG 尾部（bench mean≈33ms vs p50≈1ms）定位完毕（bench/s
 - 融合 op 的通信部分已被计算充分掩盖（ours 1.12 ≈ barrier 0.09 + gemm 0.50 + push 暴露 ~0.4）；
 - 与 NCCL 序列的差距全部集中在 **gemm_triton 质量**（consumer 2.9×、plain kernel 1.7× vs vendor）——这是纯本地优化问题，与分布式无关；
 - 8 卡判断不变但更乐观：通信占比放大对融合结构有利；传输面 20GB/s 的第二优先级（per-chunk 流水/多队列）与 gemm 1.7× 的本地差距，两者都关闭后 8 卡有实胜算。
+
+---
+
+## 7. S6 记录：gemm_allreduce 移植（新版上游 → DCU）
+
+目标：把新版上游（triton-3.7 时代，v0.0.2-rc-187）的 `kernels/amd/gemm_allreduce.py`（TP 列并行 GEMM + allreduce，`C = Σ_r a_r @ b_r^T`，每 rank 完整 C）迁到当前 hygon triton 3.3.0 / torch 2.9.0 栈。
+
+### S6.1 上游兼容性判断（为什么不能直接搬）
+
+- 上游核心原语 `dl.wait/consume_token`、`st(semantic="release", scope="system")` 全部路由到 `_ext().distributed_wait(...)` —— **编译器后端扩展**（他们打了补丁的 triton + rocSHMEM），stock triton 3.3 没有；任何一字不差的搬法都不存在。
+- 但每个原语都有 DCU 已验证等价物：pyrocshmem↔pydushmem、dl.wait↔混合自旋、IPC barrier↔SymmBarrier、静态配置表↔S5 调优结果。唯一开放问题是信号粒度（见 S6.2 探针）。
+
+### S6.2 决策探针：微型设备原子的并发流水性（bench/s6_signal_concurrency.py）
+
+上游按 tile 从 GEMM kernel 内发信号（设备发起）。S4 的 ~19MB/s 结论测的是**单 CTA 大块传输**，多 CTA 微型原子未测过。探针（2 rank 对发 8B `dushmem_uint64_atomic_set`）：
+
+| 形态 | 总 op | p50 | 每 op |
+|---|---|---|---|
+| 1 CTA × 1 op | 1 | 0.29ms | **290µs**（单 op 裸延迟） |
+| 1 CTA × 1024（串行） | 1024 | 30.0ms | **29.3µs/op** |
+| 1024 CTA × 1 | 1024 | 2.0ms | 1.95µs/op |
+| 512 CTA × 2 | 1024 | 1.35ms | **1.32µs/op** ✅ |
+| 512 CTA × 64（压力） | 32768 | 12.8ms | 0.39µs/op |
+
+**结论**：(a) 微型设备原子**可以流水**（并发 ~25× 于单 CTA 串行）；(b) 但 19.5MB/s 是**字节率天花板**——32768×8B=256KB→12.8ms 正好压线，与 S4 大块传输同一条管道。上游架构真正的死穴不在信号而在**数据面**：其 consumer 是设备发起的结果扇出（每 rank 8MB 级），在这条管道上要 ~400ms。**上游 per-tile 架构整体不可移植，必须按 DCU 平面重推导。**
+
+### S6.3 移植架构（kernels/dcu/gemm_allreduce.py）
+
+compute=逐 M-chunk 纯 GEMM（S5 配置）写自己的对称槽位；data=宿主引擎 memcpy 逐 (chunk×dest)（流序跟在该 chunk GEMM 后 → chunk c 的推送与 chunk c+1 的 GEMM 重叠）；signal=整行 flags 一次宿主 putmem（S5 零停顿模式原样）；reduce=单次启动的 consumer：按 pid 推导 chunk → 混合自旋各源 flag → fp32 求和写 C。own 槽位用流事件守卫，不经 flag。
+
+### S6.4 三个坑（都修了，都值得记住）
+
+1. **互相阻塞的 8B blocking put 死锁**：逐 chunk 一次 8B `dushmem_putmem`，两 rank 同时互发 → py-spy 显示双方都卡在 putmem 内部（注入信用式互等）。AG 每次只发整行一次所以从没踩到。
+2. **nbi+quiet 也死/慢**：改 `putmem_nbi`+末尾 `quiet` 不死锁了，但 SM 满载下 put 完成被饿死（~8ms/op，大 shape 直接挂）。→ 回到整行一次 blocking putmem（S5 验证模式），逐 chunk 信号粒度留作后续（候选：设备原子，探针已证可行）。
+3. **P9 复发（自旋 consumer 饿死 producer）**：最初逐 chunk 提前启动 consumer，其自旋 block 占满全部 CU，producer GEMM 被饿到 8ms/op、大 shape 直接"假挂死"。findings §P9 写过这条规则，重写时又踩了。修复：consumer 在信号落地后启动（AG 不踩是因为它的 consumer 就是 GEMM 本身）。附带把 4 次启动合并成 1 次（按 pid 推导 chunk，自旋条件保持标量）。
+4. **P6.1 复发（漏了 push 流等 barrier）**：AG 有 `ag_stream.wait_stream(current)`，我第一版没加——对端 push 可能早于我方 barrier 释放执行，靠时序侥幸通过测试。已补。
+
+### S6.5 v1 性能（bench/s6_bench_gemm_ar.py，50 iter，p50 ms）
+
+| 形状 (M,K,N,MPC) | ours | RCCL AR+vendor GEMM | gemm 组件 | vendor GEMM | barrier |
+|---|---|---|---|---|---|
+| 2048,2048,2048,**1024** | **1.07** | 0.24 | 0.28 | 0.09 | 0.09 |
+| 2048,2048,2048,512 | 1.50 | 0.24 | 0.48 | 0.09 | 0.09 |
+| 1024,2048,4096,512 | 1.07 | 0.24 | 0.28 | 0.09 | 0.09 |
+| 2048,8192,1024,**1024** | **1.10** | 0.35 | 0.28 | 0.24 | 0.09 |
+| 2048,8192,1024,512 | 1.45 | 0.35 | 0.48 | 0.24 | 0.09 |
+| 256,4096,4096,256 | 0.70 | 0.18 | 0.17 | 0.09 | 0.09 |
+| 128,4096,4096,128 | 0.59 | 0.15 | 0.17 | 0.07 | 0.09 |
+
+- **MPC=1024 显著优于 512**（大 shape 1.50→1.07）：2 chunk×BM=128 的 GEMM 远快于 4 chunk×BM=64（0.28 vs 0.48）——AR 的 GEMM 粒度比 AG 的传输粒度更该往大取。
+- 差距分解（以 1.07 vs 0.24 为例）：gemm_triton 0.28 vs vendor 0.09（**3.1×，主因，与 AG 完全同源的本地质量问题**）+ barrier 0.09 + ~0.45 残差（推送与 GEMM 的内存带宽竞争、宿主信号同步、consumer 尾部——S6.1 待分解）。
+- 优化路线（未做，按预期收益排序）：(a) gemm_triton 追 vendor（AG S5 同题）；(b) 逐 chunk 信号恢复流水（设备原子，S6.2 已证 1.3µs/op）；(c) 残差分解定位 0.45ms；(d) consumer 与下一 op 的 barrier 重叠。
+
+### S6.6 工程备忘
+
+- 探针/基准一律 `ulimit -c 0`（曾因编译错误 + 崩溃一次落了 ~3.9GB core dump）。
+- k_check 类校验 kernel：warmup 传 tensor（定指针槽位）而非 data_ptr()（会定型成 i64 标量，`tl.atomic_add(i64,·)` 编译错）；标量 atomic 放在 `if` 守卫内在 3.3 上编不过，去掉守卫无条件执行。
