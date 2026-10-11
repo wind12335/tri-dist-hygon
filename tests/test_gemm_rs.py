@@ -9,8 +9,6 @@ import sys
 
 REPO = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 sys.path.insert(0, REPO)
-REPO = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
-sys.path.insert(0, REPO)
 
 os.environ.setdefault("TRITON_CACHE_DIR",
                       f"/tmp/tc_gemmrs_{os.environ.get('OMPI_COMM_WORLD_RANK', '0')}")

@@ -23,16 +23,19 @@
 
 上游 NVIDIA 层的其余能力（low-latency allgather、EP a2a、flash-decode、MoE rs、perf model 等）**未移植**——它们依赖 NVSHMEM 设备 API 的完整面，等 S4/S5 的性能路线明确后按需移植。
 
-## 1. 性能现状（2×BW1000，fp16，50 iter 取 p50）
+## 1. 性能现状（2×BW1000，fp16，50 iter）
 
-| 算子 | 形状 | ours | NCCL(RCCL)+vendor GEMM | 差距分解 |
-|---|---|---|---|---|
-| AG+GEMM | M_pr=2048,K=N=2048 | 1.36 ms | 0.30 ms | gemm_triton 0.75 vs vendor 0.16（**4.7×，主因**）；push 0.42；barrier 0.09 |
-| AG+GEMM | M_pr=1024,K=4096,N=8192 | 3.05 ms | 0.62 ms | gemm_triton 2.54 vs 0.48 |
-| GEMM+RS | M=4096,K=N=2048 | 0.61 ms | 0.32 ms | gemm_triton 0.36 vs 0.16；2×barrier 0.18 |
-| 纯传输 | 8.4 MB/卡 | 0.42 ms ≈ 20 GB/s | allgather 0.17 ms ≈ 49 GB/s | 传输面 2.4×（已从 19 MB/s 修复 5000×） |
+S4 → S5（见 §6）后的最终数字（mean/p50 ms；NCCL 列 = RCCL allgather/reduce_scatter + vendor GEMM 串行）：
 
-结论：**通信面已不再是数量级瓶颈；当前输给基线的主因是 triton GEMM 本身没调优**（固定 128×128×32/w8/s2 配置）。这是 S5 的第一优先级。
+| 算子 | 形状 | S4 | **S5** | NCCL 序列 | S5 差距分解 |
+|---|---|---|---|---|---|
+| AG+GEMM | M_pr=2048,K=N=2048 | 16.7/1.38 | **1.37/1.12** | 0.30 | gemm_triton 0.50 vs vendor 0.16（**3.1×，主因**）；barrier 0.09；push 暴露 ~0.4 |
+| AG+GEMM | M_pr=1024,K=4096,N=8192 | 3.1/3.05 | **2.20/1.95** | 0.62 | gemm_triton 1.43 vs 0.48 |
+| AG+GEMM | M_pr=128(decode) | 16.7/0.67 | **0.84/0.61** | 0.16 | 小 M 下 vendor GEMM 0.09 难追 |
+| GEMM+RS | M=4096,K=N=2048 | 0.61 | **0.56** | 0.32 | gemm_triton 0.30 vs 0.16；scatter+reduce+2×barrier ~0.26 |
+| 纯传输 | 8.4 MB/卡 | 0.42 ms | 0.42 ms ≈ 20 GB/s | allgather 0.17 ms ≈ 49 GB/s | 传输面 2.4× |
+
+S5 之后：**尾部停顿已消除（mean≈p50）**，p50 提升 1.2-1.6×。当前与基线的全部剩余差距仍集中在 gemm_triton 本身（plain kernel 最优配置离 vendor 还有 1.7×，consumer 形态 2.9×）。
 
 ---
 
@@ -129,7 +132,7 @@
 1. **atomic RMW 自旋挡住 engine 写**：RMW 每圈写脏 flag line，peer 的引擎写挤不进连续 RMW 之间，偶发 20-50ms（首例 ~860ms ≈ 16MB@19MB/s，疑同源慢路径）。已定位：停顿全部落在 consumer 相位、push 相位（含信号 memcpy）0.3ms 已完成；consumer-only（无等待）40 迭代零停顿。
 2. **volatile 持续自旋死锁**：绕 L2 读 DRAM，engine 写的 L2 更新永远看不见（一次性读 fresh 是 probe 的假安全感——probe 的同步点是当时的 atomic barrier）。教训：**一次性读新鲜 ≠ 持续自旋安全**。
 3. **现行方案（混合自旋）**：128 次 volatile（纯延迟+乐观快路径）+ 1 次 atomic 探测（L2 一致性点，保证前进）。把 RMW 占空比降 128×。
-4. **残余 ~1% 尾延迟**（10-50ms）：等待"在途 engine 写对本地可见"的偶发延迟。已证与数据路径无关、**NCCL 交织不触发**（200 op 混跑 0 停顿）、首例有 ~800ms 放大。疑点：引擎写完成 ≠ 对端 L2 失效流完成，失效吞吐 ~200MB/s 量级时 4MB 数据的失效积压正好 ~20ms。**这是留給 8 卡阶段的重要观察项**——若 8 卡上不变或放大，就是写路径研究的切入点。
+4. **残余 ~1% 尾延迟**（10-50ms）：等待"在途 engine 写对本地可见"的偶发延迟。已证与数据路径无关、**NCCL 交织不触发**（200 op 混跑 0 停顿）、首例有 ~800ms 放大。疑点：引擎写完成 ≠ 对端 L2 失效流完成，失效吞吐 ~200MB/s 量级时 4MB 数据的失效积压正好 ~20ms。**→ S5.3 已定位并根治**：真正机制是信号写排在引擎数据队列后面（小 chunk 时整队列排空 ~1.6s）；信号改走 RMA 路径后全部消失。
 
 ### P9. SM 预算与提交顺序
 
@@ -164,10 +167,10 @@ NCCL 序列 ≈ dist_ag + vendor_gemm           （严格串行）
 
 ## 4. 创新点候选（从上述问题直接推导）
 
-1. **一致性感知的传输选择器**（P4 矩阵）：运行时按（写路径 × 读模式 × 等待模式）选 put/engine/atomic 组合，而非库 API 惯性。可做成 triton-dist 的通用后端抽象。
-2. **engine 写失效流的行为建模**（P8.4）：首次把 "copy 完成 ≠ 对端可见" 量化成模型，指导信号粒度与流水深度选择。
-3. **慢路径规避的 SM-producer**（P5）：用 coherent plain load/store 的 SM 搬运内核替代 device-dushmem（若 8 卡确认慢路径仍在），保留引擎只做信号。
-4. **尾延迟感知的 fused 算子调度**（P8）：~1% 的 10-50ms 尾部在 161 AR/step 下会污染 p99 步时——调度器感知并错峰，是 skew-aware 调度论文的天然素材。
+1. **一致性感知的传输选择器**（P4 矩阵 + S5.3 实证）：运行时按（写路径 × 读模式 × 等待模式 × 负载大小）选 engine/RMA/atomic 组合——S5.3 的"数据走引擎、信号走 RMA"就是第一个实例（小写混进大写在引擎队列里会灾难性排队）。可做成 triton-dist 的通用后端抽象。
+2. **引擎队列的混合负载建模**（S5.3）：小 op 与大 op 同队列时的悬崖行为（64B 信号排在 8×1MB 数据后偶发 1.6s 排空）——量化成模型可指导所有引擎编排系统的 op 分流。
+3. **慢路径规避的 SM-producer**（P5）：用 coherent plain load/store 的 SM 搬运内核替代 device-dushmem（若 8 卡确认慢路径仍在），保留引擎只做数据。
+4. **尾延迟感知的 fused 算子调度**（S5.3 残余 + 8 卡聚合）：每 ctx 一次的确定性 iter-11 停顿与 8 卡下 7 入向流的聚合概率，是 skew-aware 调度论文的天然素材。
 5. **混合自旋原语**（P8.3）：volatile 批 + atomic 探测的可调占空比，可作为语言级 `wait` 原语贡献回 triton-dist。
 
 ---
@@ -191,3 +194,44 @@ mpirun ... python3 bench/s4_rearm_probe.py
 ```
 
 位码构建（首次）：`pydushmem/src/make_fixed_bc.sh`（需 DTK stock init/xfer.bc，见脚本头注释）→ `pydushmem/src/build_bc.sh` → `pydushmem/lib/pydushmem.bc`。
+
+---
+
+## 6. S5 优化记录（GEMM 调优 + 网格放开 + 信号传输根治）
+
+### S5.1 GEMM tile 扫参（bench/tune_gemm.py，单卡，~170 配置 × 7 形状）
+
+- **统一最优 `128×128×64 / w4 / s2`**（原配置 128×128×32/w8/s2）：大 shape +7%，小 M/深 K +40%（K=8192 时已达 vendor 的 0.89×）。要点：BLOCK_K 32→64 是主要收益来源，warps 8→4 次之；stages≥3 无一胜出（gfx936 上 pipeliner 深度换不来收益）。
+- 大 shape 剩余差距 1.7×（0.293 vs 0.173 ms @4096×2048×2048）——不再是配置问题，是 tl.dot 代码生成质量（vendor 是 hipBLASLt 手写汇编）。
+- 已接入 `matmul_local`（BM=64 if M≤512）与 AG consumer。
+
+### S5.2 AG consumer 网格放开（过时的 SM 预留）
+
+- 旧 `grid = min(n_sms-2, tiles)` 预留 2 CU 是 **SM-kernel producer 时代**的遗产；S4 之后 producer 是宿主引擎 memcpy（不占 SM）。
+- 同一数学量：plain tile launch 0.323 ms vs 封顶 persistent consumer 0.758 ms（**2.3×**）。放开为 grid=tiles（persistent 循环退化为每块一个 tile）后 consumer 0.498 ms。
+- 剩余 0.498 vs 0.293 的差 = per-tile flag 检查 + rank swizzle 计算 + EVEN_K 尾部分支 + localA 间接寻址——后续可再瘦。
+
+### S5.3 【S5 核心发现】引擎信号写的悬崖停顿与 RMA 信号根治
+
+S4 遗留的 AG 尾部（bench mean≈33ms vs p50≈1ms）定位完毕（bench/s5_signal_probe.py，MPC×传输方式矩阵，每格 100 op）：
+
+| MPC（chunk 数/dest） | engine 信号 memcpy | host putmem 信号 |
+|---|---|---|
+| 512（4 chunk） | 1-2 次停顿，max ~16ms | **0 停顿，max 3.4ms** |
+| 256（8 chunk） | 1-3 次 **~1.6 秒悬崖**，mean 17-20ms | **0 停顿，max 2.0ms** |
+| 128（16 chunk） | 1-3 次 **~1.6 秒悬崖**，mean 18-20ms | **0 停顿，max 1.9ms** |
+
+- **机制**：数据走引擎 memcpy 后，信号（64B 引擎写）在同一引擎队列里排在多 MB 数据的处理后面；chunk 变多（≥8/dest）时偶发整队列排空级停顿（~1.6s ≈ 全部数据按慢速路径回退的量级）。consumer 的 flag 自旋在整个排空期间空转。
+- **修复（已为默认）**：数据仍走引擎 memcpy；信号改为 **event-sync 后由宿主 `dushmem_putmem`（RMA 路径）写入**——RMA 直写对端 L2，不经过引擎队列。代价仅每次 op 一次宿主 event 同步（~+0.05ms）。
+- 效果：bench 全形状 mean 33→0.84-2.2ms（**mean≈p50**），正确性 3/3 PASS 不变。
+- 残余（开放问题）：每个 ctx 生命周期内约一次 ~13ms 停顿，**确定性地出现在第 11 次迭代**（跨形状、跨 ctx 可复现）——按 op 计数而非时间的系统性事件，疑似运行时/驱动的周期性维护；量级已无害（+0.26ms/50 iter 的 mean），留待 8 卡阶段观察是否放大。
+
+### S5.4 M_PER_CHUNK 甜点
+
+验证 shape（M_pr=2048）扫 MPC：128→1.37 / 256→1.13 / **512→1.02** / 1024→1.57 ms（p50）。chunk 太碎引擎 op 数量多、太大则 consumer 流水浅；512（4 chunk/dest，2MB/chunk）最优。
+
+### S5.5 结论与 8 卡展望更新
+
+- 融合 op 的通信部分已被计算充分掩盖（ours 1.12 ≈ barrier 0.09 + gemm 0.50 + push 暴露 ~0.4）；
+- 与 NCCL 序列的差距全部集中在 **gemm_triton 质量**（consumer 2.9×、plain kernel 1.7× vs vendor）——这是纯本地优化问题，与分布式无关；
+- 8 卡判断不变但更乐观：通信占比放大对融合结构有利；传输面 20GB/s 的第二优先级（per-chunk 流水/多队列）与 gemm 1.7× 的本地差距，两者都关闭后 8 卡有实胜算。

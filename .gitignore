@@ -22,3 +22,6 @@ tcache*/
 .vscode/
 *.swp
 .DS_Store
+
+# crash dumps from failed runs (never commit)
+core.*

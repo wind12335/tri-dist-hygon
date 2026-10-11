@@ -22,8 +22,6 @@ import statistics
 
 REPO = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 sys.path.insert(0, REPO)
-REPO = __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__)))
-sys.path.insert(0, REPO)
 os.environ.setdefault(
     "TRITON_CACHE_DIR",
     f"/tmp/tcache_rank{os.environ.get('OMPI_COMM_WORLD_RANK', '0')}")
@@ -55,6 +53,9 @@ WARMUP, ITERS = 3, 50
 OUT_DIR = os.path.join(REPO, "bench", "results")
 
 # ---------------------------------------------------------------- helpers --
+LOG_STALLS = os.environ.get("BENCH_LOG_STALLS") == "1"
+
+
 def tloop(fn, stream=None, warmup=WARMUP, iters=ITERS):
     """GPU-event timing (ms) of fn() enqueued on `stream` (default: current)."""
     st = stream if stream is not None else torch.cuda.current_stream()
@@ -62,14 +63,17 @@ def tloop(fn, stream=None, warmup=WARMUP, iters=ITERS):
         fn()
     torch.cuda.synchronize()
     ts = []
-    for _ in range(iters):
+    for i in range(iters):
         s = torch.cuda.Event(enable_timing=True)
         e = torch.cuda.Event(enable_timing=True)
         s.record(st)
         fn()
         e.record(st)
         torch.cuda.synchronize()
-        ts.append(s.elapsed_time(e))
+        t = s.elapsed_time(e)
+        ts.append(t)
+        if LOG_STALLS and t > 5:
+            print(f"    [stall] iter {i}: {t:.1f} ms", flush=True)
     return ts
 
 

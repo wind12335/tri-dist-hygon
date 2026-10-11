@@ -27,9 +27,13 @@ reading the local shard directly), on the validated DCU planes:
   workspace slot that my still-running consumer is reading. (Upstream's op
   has no such guard; the monotonic flags alone do not protect the previous
   round's DATA.)
-- SM budget: the consumer grid still reserves 2 CUs and the producer is
-  submitted first -- the per-dest signal kernels are SM kernels launched
-  onto the ag-stream while the consumer's persistent blocks are resident.
+- SM budget: the producer is HOST-orchestrated engine memcpys (no SMs) --
+  only the tiny staging fill needs one briefly, before the consumer is
+  submitted. The consumer therefore launches one block per tile (grid ==
+  tiles: the persistent loop degenerates to one iteration per block). The
+  old n_sms-2 reservation dates from the SM-kernel producer era and cost
+  ~2.3x on large shapes (S5 sweep: plain tile launch 0.323 ms vs capped
+  persistent consumer 0.75 ms at M=4096,N=2048,K=2048).
 - strides: b layout matches upstream ([N, K], stride_bk=b.stride(1)).
 """
 import ctypes
@@ -48,6 +52,27 @@ from triton_dist.kernels.dcu.common_ops import (
     init_dcu,
     memcpy_async,
 )
+
+# Consumer GEMM tile config (S5 sweep, bench/results/tune_gemm.json):
+# BLOCK_K=64/warps=4 beats the old 32/8 everywhere (+7% large shapes,
+# +40% small-M / deep-K); best plain-kernel config on every shape.
+_CONSUMER_BLOCK_M = 128
+_CONSUMER_BLOCK_N = 128
+_CONSUMER_BLOCK_K = 64
+_CONSUMER_GROUP_M = 8
+_CONSUMER_WARPS = 4
+_CONSUMER_STAGES = 2
+
+# Push signal transport: "host" (default) | "engine"
+# "engine" (one engine memcpy of the staged flags, stream-ordered after the
+# data) hits a ~1.6 s cliff on 1-4% of ops when chunks are small (MPC<=256,
+# i.e. >=8 engine ops per dest; s5_signal_probe) -- the tiny flag write
+# queues behind the engine's processing of the multi-MB data copies and the
+# consumer's flag spin stalls for the whole drain. "host" event-syncs the
+# data copies and writes the flags via host dushmem putmem (RMA path,
+# updates the dest L2 directly): 0 stalls at every chunk size, max 2-3 ms,
+# at the cost of one host event-sync (~+0.05 ms) per op.
+SIGNAL_MODE = "host"
 
 
 @triton.jit(do_not_specialize=["flags_base", "round", "my_rank", "dest",
@@ -221,12 +246,14 @@ class AGPushKernel:
       1. chunked hipMemcpyAsync of my A shard into the peer's workspace
          slot (~110 GB/s, L2-coherent; device-initiated dushmem transfers
          are ~19 MB/s on this stack -- see common_ops.memcpy_async),
-      2. ONE engine memcpy of a device staging u64[my chunk range] filled
-         with `round` into the peer's flag slots -- stream order is the
-         data-lands-before-signal guarantee, and the consumer's atomic
-         spin sees engine writes at the L2 coherence point (the dushmem
-         atomic_set variant this replaces occasionally stalled for tens
-         of ms -- S4 bench outliers)."""
+      2. flag write for all of dest's chunks at once. Default transport
+         ("host", SIGNAL_MODE): event-sync the data copies, then host
+         dushmem putmem of the staged u64 round values into the peer's
+         flag slots (RMA path -- the peer's L2 updates directly; the
+         consumer's atomic spin reads it at the L2 coherence point).
+         "engine" (one stream-ordered engine memcpy) is kept for A/B: it
+         hits a ~1.6 s cliff on 1-4% of ops at small chunk sizes (see
+         SIGNAL_MODE above / bench/s5_signal_probe.py)."""
 
     def __init__(self, a_base, ws_base, flags_base, num_ranks, K,
                  M_per_rank, M_PER_CHUNK, elemsz):
@@ -241,6 +268,7 @@ class AGPushKernel:
                             for d in range(num_ranks)]
         self._stage = torch.empty(M_per_rank // M_PER_CHUNK,
                                   dtype=torch.int64, device="cuda")
+        self._sig_registered = False
 
     def launch(self, a_base, ws_base, flags_base, round, my_rank, M_per_rank):
         assert M_per_rank % self._M_PER_CHUNK == 0
@@ -248,21 +276,43 @@ class AGPushKernel:
         shard_off = my_rank * M_per_rank * self._K * self._elemsz
         stream = torch.cuda.current_stream().cuda_stream
         self._stage.fill_(round)  # device fill, ordered on `stream`
-        for i in range(self._num_ranks):
-            d = (my_rank + i) % self._num_ranks  # nearest peers first
-            if d == my_rank:
-                continue
+        dests = [d for i in range(self._num_ranks)
+                 for d in [(my_rank + i) % self._num_ranks]
+                 if d != my_rank]  # nearest peers first
+        for d in dests:
             dst0 = self._peer_ws[d] + shard_off
             for c in range(m_chunk_num):
                 memcpy_async(dst0 + c * self._chunk_bytes,
                              a_base + c * self._chunk_bytes,
                              self._chunk_bytes, stream)
-            # stream-ordered after dest d's copies; fires all its chunk
-            # flags at once so the consumer can start this dest while
-            # later dests are still in flight
-            memcpy_async(self._peer_flags[d]
-                         + my_rank * m_chunk_num * 8,
-                         self._stage.data_ptr(), m_chunk_num * 8, stream)
+        # Signal transport (S5 tail-latency experiment; the flag write must
+        # reach the peer AFTER its data copies). "engine" keeps the S4
+        # default: one stream-ordered engine memcpy per dest. The observed
+        # ~30 ms consumer tail (push phase long done -> the engine WRITE of
+        # the flag is not yet VISIBLE at the peer) suggests the flag write
+        # queues behind the engine's processing of the multi-MB data copies.
+        # The alternates move only the tiny flag write off that path:
+        #  "host":   event-sync the data copies, then host dushmem putmem
+        #            of the staged flags (RMA path, updates dest L2)
+        #  "device": stream-ordered kernel doing dushmem atomic_set per
+        #            chunk (m_chunk_num * 8 B rides the ~19 MB/s slow path
+        #            in ~microseconds)
+        if SIGNAL_MODE == "engine":
+            for d in dests:
+                # fires all of dest d's chunk flags at once so the consumer
+                # can start this dest while later dests are still in flight
+                memcpy_async(self._peer_flags[d] + my_rank * m_chunk_num * 8,
+                             self._stage.data_ptr(), m_chunk_num * 8, stream)
+        elif SIGNAL_MODE == "host":
+            ev = torch.cuda.Event()
+            ev.record()
+            ev.synchronize()  # data engine ops complete at the source
+            host = dcu_state()["host"]
+            for d in dests:
+                host.putmem(flags_base + my_rank * m_chunk_num * 8,
+                            self._stage.data_ptr(), m_chunk_num * 8, d)
+        else:
+            raise ValueError(f"unknown SIGNAL_MODE {SIGNAL_MODE!r}")
 
 
 @dataclasses.dataclass
@@ -357,8 +407,8 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
     # layouts assumed by the in-kernel multiple_of hints, localA mapping,
     # and the raw-byte producer memcpys
     assert a.stride(1) == 1 and b.stride(1) == 1 and a.stride(0) == K
-    assert M % 128 == 0 and N_per_rank % 128 == 0
-    assert K % 32 == 0 and K % 16 == 0
+    assert M % _CONSUMER_BLOCK_M == 0 and N_per_rank % _CONSUMER_BLOCK_N == 0
+    assert K % 16 == 0  # multiple_of hints; non-multiple-of-BLOCK_K uses the tail
     assert M_per_rank % ctx.M_PER_CHUNK == 0
 
     current_stream = torch.cuda.current_stream()
@@ -384,11 +434,12 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
         if ctx.gemm_stream is not current_stream:
             ctx.gemm_stream.wait_stream(current_stream)
     with torch.cuda.stream(ctx.gemm_stream):
-        n_sms = torch.cuda.get_device_properties(
-            torch.cuda.current_device()).multi_processor_count
-        tiles = triton.cdiv(M, 128) * triton.cdiv(N_per_rank, 128)
-        grid_size = min(n_sms - 2, tiles)  # leave CUs for the push kernel
-        kernel_gemm_ag_consumer[(grid_size,)](
+        # one block per tile; the persistent loop degenerates to a single
+        # iteration per block (NUM_SMS == grid). Producers are engine
+        # memcpys -- no SM reservation needed anymore.
+        tiles = (triton.cdiv(M, _CONSUMER_BLOCK_M)
+                 * triton.cdiv(N_per_rank, _CONSUMER_BLOCK_N))
+        kernel_gemm_ag_consumer[(tiles,)](
             ctx.ws_ptr,
             a,
             b,
@@ -404,15 +455,15 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
             num_ranks,
             ctx.flags_ptr,
             ctx.flag_round,
-            BLOCK_SIZE_M=128,
-            BLOCK_SIZE_N=128,
-            BLOCK_SIZE_K=32,
-            GROUP_SIZE_M=8,
+            BLOCK_SIZE_M=_CONSUMER_BLOCK_M,
+            BLOCK_SIZE_N=_CONSUMER_BLOCK_N,
+            BLOCK_SIZE_K=_CONSUMER_BLOCK_K,
+            GROUP_SIZE_M=_CONSUMER_GROUP_M,
             M_PER_CHUNK=ctx.M_PER_CHUNK,
-            NUM_SMS=grid_size,
-            EVEN_K=(K % 32 == 0),
-            num_warps=8,
-            num_stages=2,
+            NUM_SMS=tiles,
+            EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
+            num_warps=_CONSUMER_WARPS,
+            num_stages=_CONSUMER_STAGES,
         )
 
     current_stream.wait_stream(ctx.gemm_stream)

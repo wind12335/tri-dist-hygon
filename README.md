@@ -86,7 +86,8 @@ docs/                      移植问题全记录（findings，创新点素材）
 
 - 路线：**纯 Python 层**——内核用 stock triton `extern_elementwise` 外链 DTK 设备位码，宿主侧 ctypes；不携带也不修改上游的 lib/include/plugin/csrc/dialect。
 - 上游 NVIDIA 层（low-latency allgather、EP a2a、flash-decode 等）未移植。
-- 生产者（push/scatter/barrier arrive）是**宿主侧引擎 memcpy**：DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s（findings P5）——这是与上游最大的架构差异。
+- 生产者（push/scatter/barrier arrive）是**宿主侧编排**：数据走引擎 memcpy（DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s，findings P5），**信号走 RMA putmem**（小引擎写混进大数据写会偶发 ~1.6s 的队列排空悬崖，findings S5.3）——`all_gather_gemm.SIGNAL_MODE` 可切换。
+- GEMM tile 配置经扫参定型（`128×128×64/w4/s2`，findings S5.1）；AG consumer 每 tile 一个 block（findings S5.2）。
 
 ## License
 
