@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Built device bundle — derived from DTK bitcode, NOT redistributed.
+# Build locally: pydushmem/src/make_fixed_bc.sh (needs stock init.bc/xfer.bc
+# from your DTK install) then pydushmem/src/build_bc.sh
+pydushmem/lib/*.bc
+pydushmem/src/*.bc
+pydushmem/src/*.ll
+
+# Stock DTK bitcode drops (never commit these)
+dushbc/
+
+# Triton JIT caches (per-rank)
+tcache*/
+/tmp/tcache*
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
