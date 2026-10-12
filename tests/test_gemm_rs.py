@@ -21,7 +21,7 @@ import pydushmem.host as pHost  # noqa: E402
 mpi, comm = pHost.mpi_init()
 rank = pHost.mpi_comm_rank(mpi, comm)
 size = pHost.mpi_comm_size(mpi, comm)
-assert size == 2
+assert size in (2, 8)
 
 hip = ctypes.CDLL("/opt/dtk-26.04/lib/libamdhip64.so")
 hip.hipSetDevice.restype = ctypes.c_int
@@ -58,7 +58,9 @@ for it in range(3):
         A_it.append((torch.randn(M, K, device="cuda") * SCALE).half())
     with torch.no_grad():
         partial_it = [A_it[s].float() @ B.float().t() for s in range(size)]
-        ref_it = partial_it[0] + partial_it[1]
+        ref_it = torch.zeros_like(partial_it[0])
+        for _p in partial_it:
+            ref_it = ref_it + _p
     exp_it = ref_it[rank * Mpr:(rank + 1) * Mpr]
 
     out = grs.gemm_rs_intra_node(A_it[rank], B, ctx)

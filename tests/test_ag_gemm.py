@@ -26,7 +26,7 @@ import pydushmem.host as pHost  # noqa: E402
 mpi, comm = pHost.mpi_init()
 rank = pHost.mpi_comm_rank(mpi, comm)
 size = pHost.mpi_comm_size(mpi, comm)
-assert size == 2
+assert size in (2, 8)
 
 hip = ctypes.CDLL("/opt/dtk-26.04/lib/libamdhip64.so")
 hip.hipSetDevice.restype = ctypes.c_int

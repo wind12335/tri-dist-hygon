@@ -36,7 +36,7 @@ import pydushmem.host as pHost  # noqa: E402
 mpi, comm = pHost.mpi_init()
 rank = pHost.mpi_comm_rank(mpi, comm)
 size = pHost.mpi_comm_size(mpi, comm)
-assert size == 2
+assert size in (2, 8)
 
 hip = ctypes.CDLL("/opt/dtk-26.04/lib/libamdhip64.so")
 hip.hipSetDevice.restype = ctypes.c_int
@@ -51,7 +51,8 @@ from triton_dist.kernels.dcu.common_ops import dcu_state  # noqa: E402
 
 torch.cuda.set_device(rank)
 
-NUM_EXPERTS, H, T, TOPK = 32, 2048, 1024, 8
+NUM_EXPERTS, H, TOPK = 32, 2048, 8
+T = 1024 if size == 2 else 256  # cap the rank0 blob allgather (MRR=T*TOPK*R)
 DTYPE = torch.float16
 EPR = NUM_EXPERTS // size
 MRR = T * TOPK * size  # max recv rows (ctx worst case: all (t,j) to one rank)

@@ -15,11 +15,13 @@
 
 ¹ #1-#3：vendor GEMM + RCCL 集合通信串行；#4：RCCL all_to_all ×2。各算子的形状、组件分解与执行指令见 OPS_GUIDE。
 
+**八卡（S9）**：正确性 4/4 同样 PASS（`-np 8`），但性能胜负反转——8 卡上四算子全部落后 RCCL 2.6-7×（含 a2a 反转为慢 2.9×）。根因：数据面 (R-1) 单播引擎扇出在共享 fabric 上有效带宽掉到 17-25GB/s/rank（2 卡点对点 110GB/s）+ 宿主编排固定开销随 R 放大（barrier 0.09→0.28ms）。数字与分解见 OPS_GUIDE §6 / findings §9；对称堆 8-PE 上限 ~1.8GB/rank（`bench/s9_probe_8pe.py`）。
+
 ## 平台要求
 
 | 组件 | 版本（验证过的组合） |
 |---|---|
-| GPU | Hygon BW1000 (gfx936) ×2，驱动可 peers 访问（`hipDeviceCanAccessPeer=1`） |
+| GPU | Hygon BW1000 (gfx936) ×2 或 ×8，驱动可 peers 访问（`hipDeviceCanAccessPeer=1`） |
 | DTK | /opt/dtk-26.04（含 DUSHMEM、/opt/dtk/llvm 的 clang/opt/llvm-link） |
 | triton | 3.3.0+das wheel（hcu 后端） |
 | torch | 2.9.0+das |
@@ -82,7 +84,7 @@ moe_a2a.moe_combine_intra_node_op(ctx3, topk_idx, output, topk_weights)
 ## 测试 / 基准
 
 ```bash
-# 正确性（2 卡）
+# 正确性（-np 2 或 -np 8，脚本已 R 泛化）
 mpirun --allow-run-as-root -np 2 --oversubscribe --bind-to none \
   -mca coll ^hcoll -x HSA_FORCE_FINE_GRAIN_PCIE=1 \
   python3 tests/test_ag_gemm.py
@@ -91,9 +93,10 @@ mpirun ... python3 tests/test_gemm_ar.py
 mpirun ... python3 tests/test_moe_a2a.py
 
 # 性能（含 torch.distributed RCCL 基线）→ bench/results/
-mpirun ... python3 bench/s4_bench.py        # AG / RS
-mpirun ... python3 bench/s6_bench_gemm_ar.py  # GEMM+AR
-mpirun ... python3 bench/s7_bench_moe_a2a.py  # MoE a2a（vs RCCL 2×all_to_all）
+mpirun ... python3 bench/s4_bench.py        # AG / RS（2 卡）
+mpirun ... python3 bench/s6_bench_gemm_ar.py  # GEMM+AR（2 卡）
+mpirun ... python3 bench/s7_bench_moe_a2a.py  # MoE a2a（2 卡，vs RCCL 2×all_to_all）
+mpirun -np 8 ... python3 bench/s9_bench_8card.py  # 四算子全套（8 卡，vs RCCL）
 
 # 诊断 probe：传输微基准 / 引擎写一致性 / 尾延迟 / 设备原子并发
 mpirun ... python3 bench/s4_transport_probe.py
@@ -107,8 +110,8 @@ mpirun ... python3 bench/s6_signal_concurrency.py
 ```
 triton_dist/kernels/dcu/   融合内核（上游 amd 层 1:1 移植 + DCU 专属 producer/barrier）
 pydushmem/                 DUSHMEM ctypes 宿主绑定 + 设备 wrapper 位码 + triton 外链装置
-tests/                     2 卡正确性验收
-bench/                     性能基准与诊断 probe（含 2×BW1000 实测结果）
+tests/                     正确性验收（-np 2 / -np 8 均可）
+bench/                     性能基准与诊断 probe（含 2× 与 8×BW1000 实测结果）
 docs/                      移植问题全记录（findings）+ 算子使用指南（OPS_GUIDE）
 ```
 
