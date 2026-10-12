@@ -16,13 +16,14 @@
 | `gemm_reduce_scatter.py` | `gemm_reduce_scatter.py` | reduce-scatter over GEMM：`C_r = Σ_s (A_s@B_s^T)[rows_r]` | ✅ test_gemm_rs.py |
 | `common_ops.py` | `common_ops.py` | 初始化、对称堆 barrier、流式 wait/set 原语 | ✅（被上面两个测试覆盖） |
 | （新版上游）`gemm_allreduce.py` | `gemm_allreduce.py` | TP 列并行 GEMM + allreduce：`C = Σ_r a_r @ b_r^T`，每 rank 得完整 C | ✅ test_gemm_ar.py |
+| （新版上游）`ep_a2a(_intra_node).py` | `moe_a2a.py` | MoE expert-parallel dispatch + combine（all-to-all，动态路由 + topk 加权归并） | ✅ test_moe_a2a.py |
 
 新增基础设施（上游没有，DCU 栈必需）：
 
 - **pydushmem**：DUSHMEM 宿主 API 的 ctypes 绑定 + 设备端 wrapper 位码 + triton `extern_libs` 链接装置 + `llc` 直出修补。
 - **性能基准套件**（`bench/`）：传输微基准、一致性 probe、离群值/复发 probe、端到端 S4 基准（含 RCCL 基线）、S6 信号并发 probe。
 
-上游 NVIDIA 层与其余 amd 能力（low-latency allgather、EP a2a、flash-decode、MoE rs、perf model 等）**未移植**——它们依赖 NVSHMEM 设备 API 的完整面或编译器后端扩展，按需再评估（见 §7 的移植性判断方法）。
+上游 NVIDIA 层与其余 amd 能力（low-latency allgather、flash-decode、MoE rs、perf model 等）**未移植**——它们依赖 NVSHMEM 设备 API 的完整面或编译器后端扩展，按需再评估（见 §7/S8 的移植性判断方法）。
 
 ## 1. 性能现状（2×BW1000，fp16，50 iter）
 
@@ -293,3 +294,74 @@ compute=逐 M-chunk 纯 GEMM（S5 配置）写自己的对称槽位；data=宿�
 
 - 探针/基准一律 `ulimit -c 0`（曾因编译错误 + 崩溃一次落了 ~3.9GB core dump）。
 - k_check 类校验 kernel：warmup 传 tensor（定指针槽位）而非 data_ptr()（会定型成 i64 标量，`tl.atomic_add(i64,·)` 编译错）；标量 atomic 放在 `if` 守卫内在 3.3 上编不过，去掉守卫无条件执行。
+
+---
+
+## 8. S7 记录：MoE a2a 移植 + AR/a2a 双算子调优
+
+目标：新版上游的 `kernels/amd/ep_a2a(_intra_node).py`（MoE expert-parallel dispatch/combine）迁到本栈（S7.1-S7.4），并对 gemm_allreduce 与 a2a 做调优（S7.5）。
+
+### S7.1 上游兼容性判断（与 S6 同方法：按平面拆）
+
+- **dispatch 数据面不可移植**：上游每 (token, topk) 由 SIMT kernel 设备发起 `putmem_signal_warp` 推一行（~4-14KB 动态路由）。按 P5/S6.2 的 19.5MB/s 字节率天花板，一行 14KB ≈ 0.7ms，T=2048×topk=8 共 16384 行——整条路死刑。**必须重推导**：本地 staging kernel 按 (dest, expert) 段压拢（段基址由元数据预计算，段内原子分配位置），然后每 dest **一次** engine memcpy 推整段（~110GB/s）。
+- **combine 的 PULL 模型可直接移植**：上游 `dl.symm_at(input_buf, expert_rank) + ld`（owner 侧拉远端 expert_out 行）。决策探针 `bench/s7_peer_load_probe.py`（k_fill 远端写 → k_sum int64 累加核 peer 读）：正确性、跨轮新数据、带宽全部达标——**warm 74-83 GB/s**；首触 ~160-335ms 是一次性远端 VA 页表构建，ctx create 时 `k_touch` 每个 peer 的 out VA 预付掉。VA 预翻译走 `host.ptr`（i64 设备张量）。
+
+### S7.2 移植架构（kernels/dcu/moe_a2a.py）
+
+段代数（两侧排序约定，宿主参考实现 `_segment_tables` 与设备版 `kernel_meta_tables` 必须一致）：我的 staging 按 (dest, expert) 排序 → 每 dest 的整段连续（单次 memcpy）；对端 recv 按 (src, expert) 排序 → 我在对端 d 的落点连续于 `dst_row_base[d,0]`。max_recv_rows = max_tokens·topk·num_ranks（最坏全指向一卡——首版按 T·topk 算少了 R 倍，越界断言炸出）。
+
+**元数据面（本栈的关键重推导）**：上游用设备 `putmem_signal_nbi_block` + `dl.wait` + grid barrier 收集 splits；这里改为——单 CTA kernel `kernel_pack_meta` 直接从 topk_idx 直方图计数（gather atomic）+ 打包 `[round|splits]` 一条消息 → 每 dest 一次宿主 `putmem`（RMA 快路，消息内有序，flag 不用单独等）→ 单 CTA `kernel_meta_tables` 混合自旋（S5 模式）每源 flag 到 round 后**在设备上**算出全部段表 + `host_plan[R,4]`（每 dest 的 [行数, 对端基址, 本地基址] + recv_total）→ 一次 pinned D2H 给宿主推沿用。自己的 meta 行没人 put，必须补一次 engine 本地拷贝（首版漏了：table kernel 自旋包括自己那行 → 死等）。
+
+**相协议（2 道 SymmBarrier）**：D.end（所有 dispatch 数据落齐才能进 expert 相）+ C.start（所有 expert_out 写完才能 combine 读）。原本还有 D.start（防 peer 下一轮 push 覆盖我 expert 相还在读的 recv），**已删**——本 API 契约下 peer 要到 D.start(k+1) 必先过 C.start(k)（全部 expert 相 k 已完），传递性已闭合；首轮平凡安全。跨轮元数据覆盖安全由 D.end 传递性同理证明。
+
+跳过（语义保持）：上游的重复 rank 检测/本地预合并（每个 (t,j) 独立 staging+pull，最多 topk 数据放大）、权重转发（权重留在 owner，combine 时乘）。
+
+### S7.3 a2a 调优记录（分解探针 bench/s7_meta_decompose.py，host wall 分段）
+
+v1（bincount→pinned D2H→MPI_Allgather→numpy 表→H2D）meta 组件 0.43ms。分解：**RMA putmem 本身只 ~16µs**、自旋等待 ~20µs（两 rank 相位对称）、大头是**torch 算子链的宿主启动开销**——`reshape→.long()→bincount→.to` 四个 op 光启动就 0.13ms，加两次 sync 的排空。三步优化：
+
+1. 元数据面换 RMA（去 MPI 往返 + 宽 sync + numpy 表代数）；
+2. `kernel_pack_meta` 单 CTA 融合"清零+直方图+打包+flag"（gather atomic），替换整条 torch 链——meta 0.46→0.29ms；
+3. 删 D.start barrier（上面的传递性证明）——dispatch −0.09ms。
+
+| 组件 (T2048,H2048,topk8) | v1 | v3 |
+|---|---|---|
+| meta | 0.43 | **0.29**（启动开销 0.13 + sync×2 + putmem 0.016 + spin+表核+D2H 0.11） |
+| dispatch | 1.28 | **0.76**（= meta 0.29 + barrier 0.09 + staging+push ~0.38，push 34MB@110GB/s≈0.31 已贴底） |
+| combine | 0.47 | 0.48（33MB 远端读 @74GB/s ≈ 0.45，带宽饱和无余量） |
+| **full round** | **1.87** | **1.31** |
+
+各形状（p50 ms，`bench/s7_bench_moe_a2a.py`，RCCL 列 = 等分 all_to_all×2 串行近似）：
+
+| 形状 | ours full | dispatch | combine | RCCL 2×a2a | 倍数 |
+|---|---|---|---|---|---|
+| T2048 H2048 topk8 | **1.31** | 0.76 | 0.48 | 3.07 | **2.34×** |
+| T2048 H4096 topk8 | **2.05** | 1.03 | 0.78 | 5.97 | **2.9×** |
+| T1024 H2048 topk8 | **0.99** | 0.63 | 0.32 | 1.61 | 1.6× |
+| T2048 H2048 topk4 | **0.92** | 0.60 | 0.30 | 1.61 | 1.7× |
+| T256 H2048 topk8 | 0.74 | 0.55 | 0.18 | 0.49 | 0.66×（元数据/延迟地板，RCCL 胜小包） |
+
+### S7.4 gemm_allreduce 调优（bench/s7_ar_decompose.py）
+
+- **consumer 归约是占用受限不是带宽受限**：BLOCK 2048/w2 → 8192/w8 提速 **2.2×**（0.30→0.14ms @M2048×N2048）。MPC·N 恒为 8192 倍数（MPC%64==0, N%128==0）→ 无跨 chunk 边界块，已断言。
+- **单块 GEMM（MPC=M）整体优于分块**：一次 GEMM 启动 + 每 dest 一次 push，免掉逐 chunk 事件/流调度。2048,2048,2048：**1.07→0.83ms**；2048,8192,1024：**1.10→0.765ms**（mpc1024 同形状 0.93）。
+- 残差分解确认 barrier 0.09、push/信号路径无异常停顿；剩余差距仍是 gemm_triton 对 vendor（3.1×，AG 同题）。
+
+### S7.5 坑（都修了）
+
+1. **`tl.full((1,),…)` 存标量指针编不过**（"Value cannot be block type if pointer is not a block"）——要 `tl.store(ptr + tl.arange(0,1), v)` 把指针变 block。
+2. **自旋 kernel 等了没人写的行**：putmem 只发 peer，自己的 meta 行要 engine 本地拷贝补上（症状 = 无输出的静默死等，600s 超时）。
+3. **ctypes 调 MPI_Allreduce 是六个参数**（sendbuf, recvbuf, count, datatype, op, comm）——按 Allgather 的八参布局传会把 int 落进 op 槽 → PMPI 内 `0x1+0x54` 解引用 → SEGV@0x55。用 gdb isolate 探针 + objdump PMPI_Allreduce+0x1ad 定位。OpenMPI 句柄一律 `&symbol`（BSS 里的 struct 变量，如 `ompi_mpi_op_max`），不是 Fortran 小整数。
+4. **pinned 缓冲区 send/recv 不得重叠**（非 IN_PLACE 的 overlap 是 UB）：v1 用切片视图省内存 → rank1 的 splits 被踩 → 路由错位。
+5. **测试变换受 fp16 动态范围约束**（max 65504）：假 expert 用 `+row`（行号到 16K）→ combine 和 ~100K → inf。改 `*2+row%5` 有界变换。
+6. `recv_total` 走设备张量返回（避免强制同步）；benchmark 的 expert kernel 用设备标量 mask 守卫（max grid），全轮保持流异步。
+
+### S7.6 复现入口
+
+```bash
+mpirun ... python3 tests/test_moe_a2a.py          # MoE a2a 正确性（3/3 PASS）
+mpirun ... python3 bench/s7_peer_load_probe.py    # peer-load 决策探针
+mpirun ... python3 bench/s7_bench_moe_a2a.py      # a2a 全套 → bench/results/s7_2card_bw1000.json
+mpirun ... python3 bench/s7_meta_decompose.py     # 元数据面分解
+mpirun ... python3 bench/s7_ar_decompose.py       # AR 组件/consumer 扫参
+```

@@ -330,6 +330,9 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
     component="gemm": benchmarking mode -- GEMM chunks into MY workspace
     slot only (no push/signal/consume; flag_round is NOT advanced, so the
     next full op's waits stay correct).
+    component="push": barrier + GEMM + pushes + signal, NO consumer (the
+    residue-decomposition mode; flags advance, so re-running the consumer
+    alone afterwards is valid).
 
     a: [M, K_local]; b: [N, K_local]; c: [M, N] (caller-allocated)."""
     M, K = a.shape
@@ -356,7 +359,7 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
     # still-running consumer reads.
     ctx.gemm_stream.wait_stream(cur)
 
-    if component == "full":
+    if component in ("full", "push"):
         ctx.flag_round += 1
         ctx.barrier.round_barrier(rank)
         # the push stream must wait out the barrier (the arrive writes and
@@ -387,7 +390,7 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
             ev = torch.cuda.Event()
             ev.record(ctx.gemm_stream)
         ev_last = ev
-        if component == "full":
+        if component in ("full", "push"):
             # chunk data push on the ar stream, stream-ordered after this
             # chunk's GEMM -- chunk c's push runs under chunk c+1's GEMM
             with torch.cuda.stream(ctx.ar_stream):
@@ -398,7 +401,7 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
                 ev_d.record(ctx.ar_stream)
             evs_data.append(ev_d)
 
-    if component == "full":
+    if component in ("full", "push"):
         # single batched signal after the LAST chunk's data copies
         # completed (see ARPushKernel.signal_all for the transport history)
         evs_data[-1].synchronize()
@@ -412,13 +415,17 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
         # spins pass immediately; the lost overlap is only the reduce's
         # tail, which the per-chunk-signal future work would recover.
         cur.wait_event(ev_last)  # own-slot chunks are complete
-        assert chunk_elems % 2048 == 0  # block-aligned chunk boundaries
-        kernel_ar_consumer_reduce[(triton.cdiv(M * N, 2048),)](
+        # BLOCK 8192/w8 measured 2.2x over 2048/w2 (S7 sweep: 0.30 -> 0.14
+        # ms at M2048xN2048; the reduce is occupancy-bound, not BW-bound).
+        # MPC*N is always a multiple of 8192 (MPC % 64 == 0, N % 128 == 0),
+        # so no block straddles a chunk boundary.
+        assert chunk_elems % 8192 == 0  # block-aligned chunk boundaries
+        kernel_ar_consumer_reduce[(triton.cdiv(M * N, 8192),)](
             ctx.ws_ptr, c, ctx.flags_ptr,
             ctx.flag_round, rank, M * N,
             num_ranks=num_ranks, m_chunk_num=ctx.m_chunk_num,
             SLOT_ELEMS=ctx.max_M * N, CHUNK_ELEMS=chunk_elems,
-            BLOCK_SIZE=2048, num_warps=2)
+            BLOCK_SIZE=8192, num_warps=8)
 
     a.record_stream(ctx.gemm_stream)
     b.record_stream(ctx.gemm_stream)
