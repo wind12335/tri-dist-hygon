@@ -15,7 +15,7 @@
 
 ¹ #1-#3：vendor GEMM + RCCL 集合通信串行；#4：RCCL all_to_all ×2。各算子的形状、组件分解与执行指令见 OPS_GUIDE。
 
-**八卡（S9）**：正确性 4/4 同样 PASS（`-np 8`），但性能胜负反转——8 卡上四算子全部落后 RCCL 2.6-7×（含 a2a 反转为慢 2.9×）。根因：数据面 (R-1) 单播引擎扇出在共享 fabric 上有效带宽掉到 17-25GB/s/rank（2 卡点对点 110GB/s）+ 宿主编排固定开销随 R 放大（barrier 0.09→0.28ms）。**S11 已备好八卡复测弹药**：push 多流池已接入 AG/RS/AR（引擎并发真实：≥4MB×≥2 op 聚合 +8-16%、双工免费；但编排必须走裸 hipEvent——torch `wait_stream` 每次贵一个数量级）+ AG 单 chunk MPC（2 卡 −19%）。数字与分解见 OPS_GUIDE §6 / findings §9/§11；对称堆 8-PE 上限 ~1.8GB/rank（`bench/s9_probe_8pe.py`）。
+**八卡（S9 + S11 复测）**：正确性 4/4 同样 PASS（`-np 8`），但性能胜负反转——8 卡上四算子全部落后 RCCL 2.4-7.5×（含 a2a 反转为慢 2.5-2.8×）。根因：数据面 (R-1) 单播引擎扇出在共享 fabric 上有效带宽掉到 17-25GB/s/rank（2 卡点对点 110GB/s）+ 宿主编排固定开销随 R 放大（barrier 0.09→0.21-0.26ms）。**S11 复测（findings §11.5）**：AG 单 chunk MPC 迁移成功（M2048 4.15→3.15，−24%，对 RCCL 3.4×→2.6×）；多流 push 池经同场 A/B 判定为**中性偏负**（AG/AR 8MB op 中性、AR 4MB op −9%，且 AG 尾延迟随池复发）——扇出墙是 fabric 瓶颈而非本地队列，池已默认关闭（`TD_PUSH_STREAMS=8` 可开），追 RCCL 只剩环形/分层扇出一条路。数字见 OPS_GUIDE §6；对称堆 8-PE 上限 ~1.8GB/rank（`bench/s9_probe_8pe.py`）。
 
 ## 平台要求
 

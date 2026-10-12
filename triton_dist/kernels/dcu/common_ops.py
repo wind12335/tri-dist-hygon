@@ -77,24 +77,23 @@ def memcpy_async(dst: int, src: int, nbytes: int, stream_handle: int):
     assert rc == 0, f"hipMemcpyAsync rc={rc}"
 
 
-# S11 (bench/s11_probe_multistream.py + s11_probe_evtax.py): BW1000 runs
-# MULTIPLE copy-engine queues concurrently -- aggregate bandwidth scales
-# with streams for ops >=4MB (4MB x4: 54->63, 8MB x4: 99->111, 8MB x8:
-# 108->125 GB/s), two big ops on ONE stream even degrade below single-op
-# rate (32MB x2: 83 vs 107), and full duplex is free. BUT torch's
-# cross-stream wait_stream choreography costs 10-40 us per call here and
-# eats the whole gain; raw non-timing hipEvent record/wait cost 1-4 us and
-# keep it (8MB x8: 114.5 serial -> 137.4 ideal -> 132.8 GB/s with raw
-# events). <=2MB ops are per-op-overhead-bound (~21-33 GB/s at any stream
-# count) and never benefit. So fan-outs go out through a side-stream pool
-# with RAW-event fork/join, engaged only in the regime where it measured a
-# win: >=4 ops of >=4MB each (i.e. the >=8-card (R-1)-dest fan-out).
-# TD_PUSH_STREAMS=1 restores the single-stream fan-out everywhere (A/B).
-PUSH_STREAMS = max(1, int(os.environ.get("TD_PUSH_STREAMS", "8")))
+# S11 (bench/s11_probe_multistream.py + s11_probe_evtax.py + the 8-card
+# A/B s11_8card_{pool,nopool}.json): BW1000 runs MULTIPLE copy-engine
+# queues concurrently -- on a DEDICATED 2-card p2p link aggregate
+# bandwidth scales with streams for ops >=4MB (8MB x8: 108->125 GB/s),
+# and raw non-timing hipEvent fork/join costs only 1-4 us/op (torch's
+# wait_stream is 10-40 us and eats the whole gain). BUT the 8-card retest
+# showed the shared-fabric fan-out wall (17-25 GB/s/rank) is FABRIC-bound,
+# not queue-bound: with the pool engaged, AG/AR were neutral (-0.5/-1.1%)
+# and 4MB-op AR got 9% WORSE (concurrent bursts contend), plus the AG
+# mean-vs-p50 tail returned (25 vs 3.2 ms). So the pool ships OFF by
+# default; set TD_PUSH_STREAMS=8 to opt in (a fabric with per-link
+# headroom is where the 2-card probe says it pays).
+PUSH_STREAMS = max(1, int(os.environ.get("TD_PUSH_STREAMS", "1")))
 PUSH_OP_MIN_BYTES = 4 << 20
-# TD_PUSH_MIN_OPS is a test knob: lower it to force the multi-stream path
-# on 2 cards (correctness of the raw-event fork/join) -- production runs
-# never need it, the default engages only the >=8-card fan-out shapes.
+# TD_PUSH_MIN_OPS is a test knob: TD_PUSH_STREAMS=8 TD_PUSH_MIN_OPS=1
+# forces the multi-stream path on 2 cards (correctness of the raw-event
+# fork/join); production defaults never engage it (pool ships off).
 PUSH_OP_MIN_COUNT = max(1, int(os.environ.get("TD_PUSH_MIN_OPS", "4")))
 
 _push_stream_pool_cache = None

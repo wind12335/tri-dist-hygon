@@ -359,8 +359,11 @@ def bench_a2a(T, H, TOPK, E):
 
 
 # ------------------------------------------------------------------ run all --
-bench_ag(2048, 2048, 2048, 512)
-bench_ag(1024, 4096, 8192, 512)
+# S11: AG single-chunk MPC (M_per_rank) -- chunks land in the engine's
+# per-op sweet spot (>=4MB) and the multi-stream pool engages on the
+# (R-1)-dest fan-out. Old mpc512 rows live in s9_8card.json history.
+bench_ag(2048, 2048, 2048, 2048)
+bench_ag(1024, 4096, 8192, 1024)
 bench_ag(128, 4096, 4096, 128)      # decode-ish
 bench_rs(4096, 2048, 2048)
 bench_rs(2048, 4096, 4096)
@@ -372,7 +375,8 @@ bench_a2a(512, 2048, 8, 32)
 bench_a2a(128, 2048, 8, 32)         # decode-ish
 
 if rank == 0:
-    out = os.path.join(REPO, "bench", "results", "s9_8card.json")
+    out = os.path.join(REPO, "bench", "results",
+                       os.environ.get("S9B_OUT", "s9_8card.json"))
     with open(out, "w") as f:
         json.dump(RESULTS, f, indent=2)
     print(f"[rank 0] results -> {out}", flush=True)
