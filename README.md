@@ -2,7 +2,18 @@
 
 [triton-dist](https://github.com/bytedance/triton-dist) 的 Hygon DCU（海光）移植 —— 单机多卡 allgather+GEMM、GEMM+reduce-scatter、GEMM+allreduce 融合内核与 MoE all-to-all（dispatch/combine），基于 DTK 的 DUSHMEM（NVSHMEM 3.2.5 fork）单边通信。
 
-这是**研究代码**，用于 skew-aware 调度 / 通信-计算重叠方向。完整的问题定位记录（传输带宽、缓存一致性模型、自旋病理学等）见 **[docs/DCU_PORT_FINDINGS_zh.md](docs/DCU_PORT_FINDINGS_zh.md)**。
+这是**研究代码**，用于 skew-aware 调度 / 通信-计算重叠方向。完整的问题定位记录（传输带宽、缓存一致性模型、自旋病理学等）见 **[docs/DCU_PORT_FINDINGS_zh.md](docs/DCU_PORT_FINDINGS_zh.md)**；四个融合算子的可用性、用法、执行指令与实测数字见 **[docs/OPS_GUIDE_zh.md](docs/OPS_GUIDE_zh.md)**。
+
+## 算子总览（2×BW1000 实测，fp16，p50 ms）
+
+| 算子 | 模块 | 正确性 | ours | 基线¹ | 结论 |
+|---|---|---|---|---|---|
+| AG+GEMM | `all_gather_gemm.py` | ✅ 3/3 | 1.12 | 0.30 | 可用；落后，主因 triton GEMM 质量 |
+| GEMM+RS | `gemm_reduce_scatter.py` | ✅ 3/3 | 0.56 | 0.32 | 可用；最接近基线（1.7×） |
+| GEMM+AR | `gemm_allreduce.py` | ✅ 3/3 | 0.83 | 0.23 | 可用；S7 调优 1.07→0.83 |
+| MoE a2a | `moe_a2a.py` | ✅ 3/3 | **1.31** | 3.07 | **快 2.34×（H4096 快 2.9×）** |
+
+¹ #1-#3：vendor GEMM + RCCL 集合通信串行；#4：RCCL all_to_all ×2。各算子的形状、组件分解与执行指令见 OPS_GUIDE。
 
 ## 平台要求
 
@@ -98,7 +109,7 @@ triton_dist/kernels/dcu/   融合内核（上游 amd 层 1:1 移植 + DCU 专属
 pydushmem/                 DUSHMEM ctypes 宿主绑定 + 设备 wrapper 位码 + triton 外链装置
 tests/                     2 卡正确性验收
 bench/                     性能基准与诊断 probe（含 2×BW1000 实测结果）
-docs/                      移植问题全记录（findings，创新点素材）
+docs/                      移植问题全记录（findings）+ 算子使用指南（OPS_GUIDE）
 ```
 
 ## 路线与边界
