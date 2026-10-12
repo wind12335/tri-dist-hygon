@@ -61,7 +61,6 @@ _CONSUMER_BLOCK_N = 128
 _CONSUMER_BLOCK_K = 64
 _CONSUMER_GROUP_M = 8
 _CONSUMER_WARPS = 4
-_CONSUMER_STAGES = 2
 
 # Push signal transport: "host" (default) | "engine"
 # "engine" (one engine memcpy of the staged flags, stream-ordered after the
@@ -463,7 +462,10 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
             NUM_SMS=tiles,
             EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
             num_warps=_CONSUMER_WARPS,
-            num_stages=_CONSUMER_STAGES,
+            # S10 (tune_gemm2 + s4 A/B): s1 wins 6-8% on big/mid shapes,
+            # loses on decode (M<=256) -- same M-threshold as the plain
+            # kernel in gemm_reduce_scatter.matmul_local.
+            num_stages=1 if M > 512 else 2,
         )
 
     current_stream.wait_stream(ctx.gemm_stream)

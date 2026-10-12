@@ -154,7 +154,10 @@ def matmul_local(a, b, scratch, transpose_weight=False):
 
     # S5 sweep (bench/results/tune_gemm.json): BLOCK_K=64/warps=4 is best
     # on every shape (+7% large, +40% small-M); small M prefers BLOCK_M=64.
+    # S10 sweep (bench/results/tune_gemm2.json): num_stages=1 wins 6-15% on
+    # the big/mid shapes (M>512, K<8192); decode (M<=512) and deep-K keep s2.
     block_m = 64 if M <= 512 else 128
+    stages = 1 if (M > 512 and K < 8192) else 2
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     compiled = kernel_gemm_rs_producer_local[grid](
         a, b, scratch,  #
@@ -164,7 +167,7 @@ def matmul_local(a, b, scratch, transpose_weight=False):
         scratch.stride(0), scratch.stride(1),  #
         BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=128, BLOCK_SIZE_K=64,
         GROUP_SIZE_M=8,
-        num_warps=4, num_stages=2,
+        num_warps=4, num_stages=stages,
     )
     return compiled
 

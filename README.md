@@ -8,9 +8,9 @@
 
 | 算子 | 模块 | 正确性 | ours | 基线¹ | 结论 |
 |---|---|---|---|---|---|
-| AG+GEMM | `all_gather_gemm.py` | ✅ 3/3 | 1.12 | 0.30 | 可用；落后，主因 triton GEMM 质量 |
-| GEMM+RS | `gemm_reduce_scatter.py` | ✅ 3/3 | 0.56 | 0.32 | 可用；最接近基线（1.7×） |
-| GEMM+AR | `gemm_allreduce.py` | ✅ 3/3 | 0.83 | 0.23 | 可用；S7 调优 1.07→0.83 |
+| AG+GEMM | `all_gather_gemm.py` | ✅ 3/3 | 1.12 | 0.30 | 可用；落后，主因 triton GEMM 质量（S10 −6-8%） |
+| GEMM+RS | `gemm_reduce_scatter.py` | ✅ 3/3 | **0.51** | 0.32 | 可用；最接近基线（1.6×，S10: 0.56→0.51） |
+| GEMM+AR | `gemm_allreduce.py` | ✅ 3/3 | **0.75** | 0.23 | 可用；S7+S10 调优 1.07→0.752 |
 | MoE a2a | `moe_a2a.py` | ✅ 3/3 | **1.31** | 3.07 | **快 2.34×（H4096 快 2.9×）** |
 
 ¹ #1-#3：vendor GEMM + RCCL 集合通信串行；#4：RCCL all_to_all ×2。各算子的形状、组件分解与执行指令见 OPS_GUIDE。
@@ -98,11 +98,12 @@ mpirun ... python3 bench/s6_bench_gemm_ar.py  # GEMM+AR（2 卡）
 mpirun ... python3 bench/s7_bench_moe_a2a.py  # MoE a2a（2 卡，vs RCCL 2×all_to_all）
 mpirun -np 8 ... python3 bench/s9_bench_8card.py  # 四算子全套（8 卡，vs RCCL）
 
-# 诊断 probe：传输微基准 / 引擎写一致性 / 尾延迟 / 设备原子并发
+# 诊断 probe：传输微基准 / 引擎写一致性 / 尾延迟 / 设备原子并发 / GEMM 扫参
 mpirun ... python3 bench/s4_transport_probe.py
 mpirun ... python3 bench/probe_memcpy_freshness.py
 mpirun ... python3 bench/s4_rearm_probe.py
 mpirun ... python3 bench/s6_signal_concurrency.py
+python3 bench/tune_gemm2.py            # GEMM 扫参 v2（单卡，含 split-K/s=1 等新轴）
 ```
 
 ## 目录
@@ -121,7 +122,7 @@ docs/                      移植问题全记录（findings）+ 算子使用指�
 - 已移植：AG+GEMM、GEMM+RS（旧上游 amd 层 1:1）、**GEMM+AR（新版上游 gemm_allreduce，按 DCU 平面重推导——上游的 per-tile 设备信号/扇出架构依赖编译器扩展且撞 19.5MB/s 设备管道天花板，findings S6）**、**MoE a2a（新版上游 ep_a2a：dispatch 数据面重推导为 staging+整段 engine 推送，combine 的 PULL 模型直接移植，元数据走 RMA+设备段表，findings S7；2×BW1000 上比 RCCL 2×all_to_all 快 2.3-2.9×）**。
 - 未移植：上游 NVIDIA 层与新版 amd 的 low-latency allgather / flash-decode / MoE rs 等（依赖 NVSHMEM 设备 API 完整面或编译器后端扩展）。
 - 生产者（push/scatter/barrier arrive）是**宿主侧编排**：数据走引擎 memcpy（DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s，findings P5），**信号走整行 RMA putmem**（小引擎写混进大数据写会偶发 ~1.6s 队列排空悬崖，findings S5.3；逐 chunk 的 8B blocking put 会互相死锁，findings S6.4）——`all_gather_gemm.SIGNAL_MODE` 可切换。
-- GEMM tile 配置经扫参定型（`128×128×64/w4/s2`，findings S5.1）；AG consumer 每 tile 一个 block（findings S5.2）；AR 取单块 MPC=M（S7 调优：1.07→0.83ms），consumer BLOCK 8192/w8（占用受限，findings S7.4）。
+- GEMM tile 配置经扫参定型（`128×128×64/w4`；**num_stages 按形状切**：M>512 且 K<8192 → s1（S10 发现，−6-21%），否则 s2——findings S5.1/S10）；AG consumer 每 tile 一个 block（findings S5.2）；AR 取单块 MPC=M（S7+S10：1.07→0.752ms），consumer BLOCK 8192/w8（占用受限，findings S7.4）。
 - 自旋 consumer 不得与 producer GEMM 同时占满 SM（P9，AR 移植时复发过一次，findings S6.4）。
 
 ## License

@@ -386,7 +386,9 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
                 b.stride(1), b.stride(0),
                 N, 1,  # ws slot [max_M, N] contiguous
                 BLOCK_SIZE_M=block_m, BLOCK_SIZE_N=128, BLOCK_SIZE_K=64,
-                GROUP_SIZE_M=8, num_warps=4, num_stages=2)
+                GROUP_SIZE_M=8, num_warps=4,
+                # S10 (tune_gemm2): s1 wins on big/mid shapes, deep-K keeps s2
+                num_stages=1 if (MPC > 512 and K < 8192) else 2)
             ev = torch.cuda.Event()
             ev.record(ctx.gemm_stream)
         ev_last = ev

@@ -8,9 +8,9 @@
 
 | # | 算子 | 模块 | 语义 | 正确性 | 端到端 vs 基线 |
 |---|---|---|---|---|---|
-| 1 | AG+GEMM | `all_gather_gemm.py` | `C = allgather(A) @ B^T`，每 rank 得完整 `[M, N_pr]` | ✅ 3/3 | 1.12 vs 0.30 ms（落后，主因 gemm 质量） |
-| 2 | GEMM+RS | `gemm_reduce_scatter.py` | rank r 留 `Σ_r a_r@b_r^T` 的第 r 行块 | ✅ 3/3 | 0.56 vs 0.32 ms（落后 1.7×，同因） |
-| 3 | GEMM+AR | `gemm_allreduce.py` | `C = Σ_r a_r @ b_r^T`，每 rank 得完整 C | ✅ 3/3 | 0.83 vs 0.23 ms（S7 调优后 1.07→0.83） |
+| 1 | AG+GEMM | `all_gather_gemm.py` | `C = allgather(A) @ B^T`，每 rank 得完整 `[M, N_pr]` | ✅ 3/3 | 1.12 vs 0.30 ms（落后，主因 gemm 质量；S10 −6-8%） |
+| 2 | GEMM+RS | `gemm_reduce_scatter.py` | rank r 留 `Σ_r a_r@b_r^T` 的第 r 行块 | ✅ 3/3 | **0.51** vs 0.32 ms（S10: 0.56→0.51，落后 1.6×） |
+| 3 | GEMM+AR | `gemm_allreduce.py` | `C = Σ_r a_r @ b_r^T`，每 rank 得完整 C | ✅ 3/3 | **0.75** vs 0.23 ms（S10: 0.83→0.75，gemm 组件 −21%） |
 | 4 | MoE a2a | `moe_a2a.py` | expert-parallel dispatch/combine（动态路由 + topk 加权归并） | ✅ 3/3 | **1.31 vs 3.07 ms（快 2.34×；H4096 快 2.9×）** |
 
 基线定义：#1-#3 = `torch.matmul`（vendor rocBLAS）+ 对应 RCCL 集合通信串行；#4 = RCCL `all_to_all_single` 等分近似 ×2（dispatch+combine 两趟）。RCCL 在本机由 torch.distributed（backend "nccl"→RCCL）提供。
@@ -68,7 +68,7 @@ mpirun ... python3 bench/s4_bench.py          # AG+RS 全套 -> bench/results/s4
 | 1024, 4096, 8192, 256 | 1.95 | 0.62 | 1.43 / 0.32 / 0.09 |
 | 2048, 2048, 2048, 256 | 1.12 | 0.30 | 0.50 / 0.43 / 0.09 |
 
-MPC 甜点：512（mpc 扫参 128→1024：1.39/1.13/1.02/0.94）。状态注记：落后主因 = gemm_triton 对 vendor 3.1×；纯传输面 20 vs 49 GB/s（P5/S4）。优化史见 findings §6（S5）。
+MPC 甜点：512（mpc 扫参 128→1024：1.39/1.13/1.02/0.94）。**S10 更新**：consumer `num_stages=1`（M>512 时）再 −6-8%（M2048 mpc256 1.198→1.121；M1024_K4096_N8192 2.017→1.864）；decode（M≤256）保持 s2。状态注记：落后主因 = gemm_triton 对 vendor 3.1×；纯传输面 20 vs 49 GB/s（P5/S4）。优化史见 findings §6（S5）/§10（S10）。
 
 ---
 
@@ -98,10 +98,10 @@ mpirun ... python3 bench/s4_bench.py    # rs 段 -> 同一 JSON
 | 形状 (M,K,N) | ours | dist_seq | 组件：gemm / scatter / reduce |
 |---|---|---|---|
 | 512, 4096, 4096 | 0.48 | 0.22 | 0.24 / 0.09 / 0.10 |
-| 2048, 4096, 4096 | 0.77 | 0.42 | 0.51 / 0.13 / 0.10 |
-| 4096, 2048, 2048 | 0.56 | 0.32 | 0.30 / 0.13 / 0.10 |
+| 2048, 4096, 4096 | **0.69**（S10） | 0.42 | 0.43 / 0.13 / 0.10 |
+| 4096, 2048, 2048 | **0.51**（S10） | 0.32 | 0.26 / 0.13 / 0.10 |
 
-状态注记：三算子中最接近基线（1.7×）；同样卡在 gemm 质量。优化史见 findings §6。
+状态注记：三算子中最接近基线（**1.6×，S10 后**）；同样卡在 gemm 质量。**S10 更新**：`matmul_local` 按形状切 `num_stages`（M>512 且 K<8192 → s1，同场 A/B gemm 组件 −15/16%，端到端 −10/12%）。优化史见 findings §6（S5）/§10（S10）。
 
 ---
 
@@ -130,14 +130,14 @@ mpirun ... python3 bench/s7_ar_decompose.py      # S7 调参探针（consumer/mo
 
 **实测（p50 ms；dist_seq = vendor GEMM + RCCL allreduce 串行）**：
 
-| 形状 (M,K,N) | ours（S7 调优后） | 调优前 | dist_seq |
+| 形状 (M,K,N) | ours（S7+S10 调优后） | 调优前 | dist_seq |
 |---|---|---|---|
-| 2048, 2048, 2048 | **0.83**（MPC=2048） | 1.07（MPC=1024） | 0.23 |
-| 2048, 8192, 1024 | **0.765**（MPC=2048） | 1.10 | 0.35 |
+| 2048, 2048, 2048 | **0.752**（S10: 0.83→0.752，gemm 0.21→0.165） | 1.07（MPC=1024） | 0.23 |
+| 2048, 8192, 1024 | **0.765**（深 K 保持 s2，数字不变） | 1.10 | 0.35 |
 | 256, 4096, 4096 | 0.70（S6 数，S7 配置可再降，未复测） | — | 0.17 |
 | 128, 4096, 4096 | 0.59（同上） | — | 0.14 |
 
-S7 两项调优：consumer BLOCK 8192/w8（占用受限，2.2×）+ 单块 MPC=M。状态注记：与 #1/#2 同源——gemm_triton 0.28 vs vendor 0.09 是主因；逐 chunk 信号流水（恢复 GEMM/归约重叠）是下一步（设备原子 1.3µs/op 已探明可行）。优化史见 findings §7/S7.4。
+S7 两项调优：consumer BLOCK 8192/w8（占用受限，2.2×）+ 单块 MPC=M。**S10 更新**：producer `num_stages=1`（MPC>512 且 K<8192）。状态注记：与 #1/#2 同源——gemm_triton 0.165 vs vendor 0.095 仍是主因（1.7×）；逐 chunk 信号流水（恢复 GEMM/归约重叠）是下一步（设备原子 1.3µs/op 已探明可行）。优化史见 findings §7（S7.4）/§10（S10）。
 
 ---
 
@@ -227,8 +227,8 @@ mpirun --allow-run-as-root -np 8 --oversubscribe --bind-to none \
 ## 7. 横向结论
 
 - **能用的定义**：每个算子 = 正确性 3/3 PASS（fresh-data 多迭代 + 跨卡全量审计 + 干净退出，2 卡与 8 卡均验）+ 尾延迟根治（mean≈p50，8 卡 AG 除外——开放项）+ 分解基准可复现。
-- **性能结论按卡数分**：2 卡上 a2a（无本地 GEMM）纯 planes 优势兑现为 2.3-2.9×，三个 GEMM 融合算子落后基线（主因 triton GEMM 本地质量 1.7-3.1×）；8 卡上传输面 (R-1) 单播扇出不扩展 + 固定开销放大，四算子全部落后 2.6-7×（§6）。
+- **性能结论按卡数分**：2 卡上 a2a（无本地 GEMM）纯 planes 优势兑现为 2.3-2.9×，三个 GEMM 融合算子落后基线（主因 triton GEMM 本地质量，S10 后对 vendor 1.6-1.9×）；8 卡上传输面 (R-1) 单播扇出不扩展 + 固定开销放大，四算子全部落后 2.6-7×（§6）。
 - **已定型的三条传输平面**（所有算子共用）：数据 = 宿主引擎 memcpy ~110GB/s（**2 卡点对点**；8 卡共享 fabric 下 17-25GB/s/rank）；信号/元数据 = 宿主 RMA putmem（16µs/条，消息内有序）；远端读 = 设备 plain load 74-83GB/s（L2 一致，混合自旋守卫）。设备发起的 dushmem 传输是 19.5MB/s 字节率天花板（P5），任何新算子先按这三条平面重推导。
-- **下一步（按收益排序）**：8 卡数据面改环形/分层扇出（对齐 RCCL 摊销方式，惠及全部四算子）；barrier 换设备原子路径（S6.2 已证 1.3µs/op）或合并轮次；gemm_triton 追 vendor（惠及 #1-#3）；AG 8 卡尾延迟定位。
+- **下一步（按收益排序）**：8 卡数据面改环形/分层扇出（对齐 RCCL 摊销方式，惠及全部四算子）；barrier 换设备原子路径（S6.2 已证 1.3µs/op）或合并轮次；gemm_triton 追 vendor（S10 已收 −6-21%，剩余 1.6-1.9× 是代码生成质量）；AG 8 卡尾延迟定位；S8 skew 基准复测（GEMM 逆差收窄后赢区空缺预期显著变小）。
 
-各算子完整问题定位与优化时间线：[DCU_PORT_FINDINGS_zh.md](DCU_PORT_FINDINGS_zh.md)（§6=S5 调优、§7=S6 AR 移植、§8=S7 a2a 移植+双算子调优、§9=S9 八卡复测与反转分析）。
+各算子完整问题定位与优化时间线：[DCU_PORT_FINDINGS_zh.md](DCU_PORT_FINDINGS_zh.md)（§6=S5 调优、§7=S6 AR 移植、§8=S7 a2a 移植+双算子调优、§9=S9 八卡复测与反转分析、§10=S10 GEMM 扫参 v2/num_stages=1）。
