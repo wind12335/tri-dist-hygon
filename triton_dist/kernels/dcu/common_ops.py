@@ -17,6 +17,7 @@ Requires the process set up exactly once via `init_dcu()`:
   dcu_common.init_dcu(mpi, comm, rank, size)
 """
 import ctypes
+import os
 
 import torch
 import triton
@@ -74,6 +75,88 @@ def memcpy_async(dst: int, src: int, nbytes: int, stream_handle: int):
     rc = h.hipMemcpyAsync(ctypes.c_void_p(dst), ctypes.c_void_p(src),
                           nbytes, 3, ctypes.c_void_p(stream_handle))
     assert rc == 0, f"hipMemcpyAsync rc={rc}"
+
+
+# S11 (bench/s11_probe_multistream.py + s11_probe_evtax.py): BW1000 runs
+# MULTIPLE copy-engine queues concurrently -- aggregate bandwidth scales
+# with streams for ops >=4MB (4MB x4: 54->63, 8MB x4: 99->111, 8MB x8:
+# 108->125 GB/s), two big ops on ONE stream even degrade below single-op
+# rate (32MB x2: 83 vs 107), and full duplex is free. BUT torch's
+# cross-stream wait_stream choreography costs 10-40 us per call here and
+# eats the whole gain; raw non-timing hipEvent record/wait cost 1-4 us and
+# keep it (8MB x8: 114.5 serial -> 137.4 ideal -> 132.8 GB/s with raw
+# events). <=2MB ops are per-op-overhead-bound (~21-33 GB/s at any stream
+# count) and never benefit. So fan-outs go out through a side-stream pool
+# with RAW-event fork/join, engaged only in the regime where it measured a
+# win: >=4 ops of >=4MB each (i.e. the >=8-card (R-1)-dest fan-out).
+# TD_PUSH_STREAMS=1 restores the single-stream fan-out everywhere (A/B).
+PUSH_STREAMS = max(1, int(os.environ.get("TD_PUSH_STREAMS", "8")))
+PUSH_OP_MIN_BYTES = 4 << 20
+# TD_PUSH_MIN_OPS is a test knob: lower it to force the multi-stream path
+# on 2 cards (correctness of the raw-event fork/join) -- production runs
+# never need it, the default engages only the >=8-card fan-out shapes.
+PUSH_OP_MIN_COUNT = max(1, int(os.environ.get("TD_PUSH_MIN_OPS", "4")))
+
+_push_stream_pool_cache = None
+_push_event_cache = None  # (fork_event, [join events per pool slot])
+
+
+def _fan_out_events(h, n):
+    global _push_event_cache
+    if _push_event_cache is None or len(_push_event_cache[1]) < n:
+        def mk():
+            ev = ctypes.c_void_p()
+            rc = h.hipEventCreateWithFlags(ctypes.byref(ev), 0x2)
+            assert rc == 0, f"hipEventCreateWithFlags rc={rc}"
+            return ev
+        joins = [mk() for _ in range(max(n, PUSH_STREAMS))]
+        _push_event_cache = (mk(), joins)
+    return _push_event_cache[0], _push_event_cache[1][:n]
+
+
+def fan_out_memcpy_async(ops):
+    """Issue (dst, src, nbytes) engine copies round-robin across a side
+    stream pool, forked from and joined back to the CURRENT torch stream
+    with RAW hipEvents (torch wait_stream is 10-40x pricier per call --
+    S11 evtax probe).
+
+    On return the copies are stream-ordered complete on the current stream
+    (still async on the host): any event recorded, engine write issued, or
+    host putmem event-synced on the current stream afterwards sees ALL of
+    them landed -- every signal-ordering contract is preserved. Outside
+    the measured-win regime (<PUSH_OP_MIN_COUNT ops or any op below
+    PUSH_OP_MIN_BYTES, TD_PUSH_STREAMS=1) this degrades to the plain
+    single-stream path."""
+    if (PUSH_STREAMS <= 1 or len(ops) < PUSH_OP_MIN_COUNT
+            or min(o[2] for o in ops) < PUSH_OP_MIN_BYTES):
+        stream = torch.cuda.current_stream().cuda_stream
+        for dst, src, nbytes in ops:
+            memcpy_async(dst, src, nbytes, stream)
+        return
+    global _push_stream_pool_cache
+    if _push_stream_pool_cache is None:
+        _push_stream_pool_cache = [torch.cuda.Stream()
+                                   for _ in range(PUSH_STREAMS)]
+    h = hip()
+    h.hipEventRecord.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    h.hipStreamWaitEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.c_uint64]
+    cur = torch.cuda.current_stream()
+    pool = _push_stream_pool_cache[:min(PUSH_STREAMS, len(ops))]
+    ev_fork, ev_join = _fan_out_events(h, len(pool))
+    cur_h = ctypes.c_void_p(cur.cuda_stream)
+    # fork: pool streams order after the current stream's dependencies
+    assert h.hipEventRecord(ev_fork, cur_h) == 0
+    for s in pool:
+        assert h.hipStreamWaitEvent(ctypes.c_void_p(s.cuda_stream),
+                                    ev_fork, 0) == 0
+    n = len(pool)
+    for i, (dst, src, nbytes) in enumerate(ops):
+        memcpy_async(dst, src, nbytes, pool[i % n].cuda_stream)
+    # join: the current stream now orders after every copy
+    for i, s in enumerate(pool):
+        assert h.hipEventRecord(ev_join[i], ctypes.c_void_p(s.cuda_stream)) == 0
+        assert h.hipStreamWaitEvent(cur_h, ev_join[i], 0) == 0
 
 
 HIP_WAIT_EQ = 0  # hipStreamWaitValueEq

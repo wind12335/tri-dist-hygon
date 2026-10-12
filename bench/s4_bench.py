@@ -132,10 +132,10 @@ RESULTS = {
 # ----------------------------------------------------------------- AG-GEMM --
 AG_SHAPES = [  # (M_per_rank, K, N_per_rank, M_PER_CHUNK)
     (128, 4096, 4096, 128),   # decode small batch (M=256 gathered)
-    (512, 4096, 4096, 256),
-    (1024, 4096, 8192, 256),
-    (1024, 8192, 1024, 256),
-    (2048, 2048, 2048, 256),  # validated shape
+    (512, 4096, 4096, 512),   # S11: single-chunk MPC -- engine BW steps
+    (1024, 4096, 8192, 1024), # 25->48->70 GB/s at 2/4/8MB per op; the old
+    (1024, 8192, 1024, 1024), # mpc256 rows are in git history + ag_mpc sweep
+    (2048, 2048, 2048, 2048),  # validated shape
 ]
 
 
@@ -215,8 +215,9 @@ for shp in AG_SHAPES:
         print(f"[rank {rank}] AG shape {shp} FAILED:", flush=True)
         traceback.print_exc()
 
-# M_PER_CHUNK sensitivity on the validated shape
-for MPC in (128, 256, 512, 1024):
+# M_PER_CHUNK sensitivity on the validated shape (2048 = M_pr: single 8MB
+# chunk; s11 probe says engine bandwidth steps 25->48->70 GB/s at 2/4/8MB)
+for MPC in (128, 256, 512, 1024, 2048):
     try:
         RESULTS["ag_mpc"][f"mpc{MPC}"] = bench_ag(2048, 2048, 2048, MPC)
     except Exception:

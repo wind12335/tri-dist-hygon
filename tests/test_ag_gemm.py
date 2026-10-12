@@ -45,7 +45,10 @@ from triton_dist.kernels.dcu.common_ops import dcu_state  # noqa: E402
 M_per_rank = 2048
 K = N = 2048
 M = M_per_rank * size
-M_PER_CHUNK = 256  # 8 chunks/rank: exercises the (source, chunk) flag grid
+# default 256 = 8 chunks/rank: exercises the (source, chunk) flag grid.
+# TEST_MPC=1024 (2 x 4MB chunks) + TD_PUSH_MIN_OPS=1 exercises the S11
+# multi-stream push pool's raw-event fork/join end to end.
+M_PER_CHUNK = int(os.environ.get("TEST_MPC", "256"))
 DTYPE = torch.float16
 SCALE = 0.02
 

@@ -8,14 +8,14 @@
 
 | 算子 | 模块 | 正确性 | ours | 基线¹ | 结论 |
 |---|---|---|---|---|---|
-| AG+GEMM | `all_gather_gemm.py` | ✅ 3/3 | 1.12 | 0.30 | 可用；落后，主因 triton GEMM 质量（S10 −6-8%） |
+| AG+GEMM | `all_gather_gemm.py` | ✅ 3/3 | 0.91 | 0.31 | 可用；S10+S11 调优 1.40→0.91，主因 triton GEMM 质量 |
 | GEMM+RS | `gemm_reduce_scatter.py` | ✅ 3/3 | **0.51** | 0.32 | 可用；最接近基线（1.6×，S10: 0.56→0.51） |
 | GEMM+AR | `gemm_allreduce.py` | ✅ 3/3 | **0.75** | 0.23 | 可用；S7+S10 调优 1.07→0.752 |
 | MoE a2a | `moe_a2a.py` | ✅ 3/3 | **1.31** | 3.07 | **快 2.34×（H4096 快 2.9×）** |
 
 ¹ #1-#3：vendor GEMM + RCCL 集合通信串行；#4：RCCL all_to_all ×2。各算子的形状、组件分解与执行指令见 OPS_GUIDE。
 
-**八卡（S9）**：正确性 4/4 同样 PASS（`-np 8`），但性能胜负反转——8 卡上四算子全部落后 RCCL 2.6-7×（含 a2a 反转为慢 2.9×）。根因：数据面 (R-1) 单播引擎扇出在共享 fabric 上有效带宽掉到 17-25GB/s/rank（2 卡点对点 110GB/s）+ 宿主编排固定开销随 R 放大（barrier 0.09→0.28ms）。数字与分解见 OPS_GUIDE §6 / findings §9；对称堆 8-PE 上限 ~1.8GB/rank（`bench/s9_probe_8pe.py`）。
+**八卡（S9）**：正确性 4/4 同样 PASS（`-np 8`），但性能胜负反转——8 卡上四算子全部落后 RCCL 2.6-7×（含 a2a 反转为慢 2.9×）。根因：数据面 (R-1) 单播引擎扇出在共享 fabric 上有效带宽掉到 17-25GB/s/rank（2 卡点对点 110GB/s）+ 宿主编排固定开销随 R 放大（barrier 0.09→0.28ms）。**S11 已备好八卡复测弹药**：push 多流池已接入 AG/RS/AR（引擎并发真实：≥4MB×≥2 op 聚合 +8-16%、双工免费；但编排必须走裸 hipEvent——torch `wait_stream` 每次贵一个数量级）+ AG 单 chunk MPC（2 卡 −19%）。数字与分解见 OPS_GUIDE §6 / findings §9/§11；对称堆 8-PE 上限 ~1.8GB/rank（`bench/s9_probe_8pe.py`）。
 
 ## 平台要求
 
@@ -103,6 +103,8 @@ mpirun ... python3 bench/s4_transport_probe.py
 mpirun ... python3 bench/probe_memcpy_freshness.py
 mpirun ... python3 bench/s4_rearm_probe.py
 mpirun ... python3 bench/s6_signal_concurrency.py
+mpirun ... python3 bench/s11_probe_multistream.py   # 引擎多流并发矩阵
+mpirun ... python3 bench/s11_probe_evtax.py         # 跨流事件编排开销
 python3 bench/tune_gemm2.py            # GEMM 扫参 v2（单卡，含 split-K/s=1 等新轴）
 ```
 
@@ -123,6 +125,7 @@ docs/                      移植问题全记录（findings）+ 算子使用指�
 - 未移植：上游 NVIDIA 层与新版 amd 的 low-latency allgather / flash-decode / MoE rs 等（依赖 NVSHMEM 设备 API 完整面或编译器后端扩展）。
 - 生产者（push/scatter/barrier arrive）是**宿主侧编排**：数据走引擎 memcpy（DCU 上 device 发起的 dushmem 传输实测 ~19 MB/s，宿主发起 ~110 GB/s，findings P5），**信号走整行 RMA putmem**（小引擎写混进大数据写会偶发 ~1.6s 队列排空悬崖，findings S5.3；逐 chunk 的 8B blocking put 会互相死锁，findings S6.4）——`all_gather_gemm.SIGNAL_MODE` 可切换。
 - GEMM tile 配置经扫参定型（`128×128×64/w4`；**num_stages 按形状切**：M>512 且 K<8192 → s1（S10 发现，−6-21%），否则 s2——findings S5.1/S10）；AG consumer 每 tile 一个 block（findings S5.2）；AR 取单块 MPC=M（S7+S10：1.07→0.752ms），consumer BLOCK 8192/w8（占用受限，findings S7.4）。
+- **push 扇出（S11）**：AG/RS/AR 的数据推送过 `common_ops.fan_out_memcpy_async` 侧流池（裸 hipEvent fork/join，≥4 op × 每个 ≥4MB 才启用 = 八卡扇出形状；`TD_PUSH_STREAMS=1` 关闭）；**AG 的 M_PER_CHUNK 取 M_per_rank（每 dest 单 chunk）最优**——引擎单 op 带宽有台阶（2/4/8MB ≈ 25/48/70 GB/s），2 卡 −3~19%（findings S11）。
 - 自旋 consumer 不得与 producer GEMM 同时占满 SM（P9，AR 移植时复发过一次，findings S6.4）。
 
 ## License

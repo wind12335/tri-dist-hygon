@@ -30,8 +30,8 @@ from triton_dist.kernels.dcu.common_ops import (
     SymmBarrier,
     barrier_all_on_stream,
     dcu_state,
+    fan_out_memcpy_async,
     init_dcu,
-    memcpy_async,
 )
 
 
@@ -192,11 +192,14 @@ class ScatterPutKernel:
         self._peer_dst = [s["host"].ptr(dst_base, d) for d in range(num_ranks)]
 
     def launch(self, src_base, dst_base, my_rank, total):
-        stream = torch.cuda.current_stream().cuda_stream
         nbytes = total * self._elemsz
-        for d in range(self._num_ranks):
-            memcpy_async(self._peer_dst[d] + my_rank * nbytes,
-                         src_base + d * nbytes, nbytes, stream)
+        # S11: per-dest copies fanned out across the push-stream pool
+        # (joined back to the current stream, so the landing barrier that
+        # follows keeps its stream-order completion semantics)
+        fan_out_memcpy_async([
+            (self._peer_dst[d] + my_rank * nbytes,
+             src_base + d * nbytes, nbytes)
+            for d in range(self._num_ranks)])
 
 
 def ring_reduce_after_scatter(rank, num_ranks, c_ptr_i64, M, N,

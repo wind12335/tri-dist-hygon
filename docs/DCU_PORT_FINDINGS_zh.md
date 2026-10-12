@@ -457,3 +457,62 @@ vendor（hipBLASLt）10.95ms = **362 TFLOPS**；triton 最优 21.13ms（仍是 1
 | AG M2048_K2048_N2048（mpc256） | 1.198 | **1.121**（−6%） | 0.504→0.468 |
 
 正确性 3/3 PASS（ag/rs/ar）。**对 S8 的意义**：赢区空缺（153-255µs）里最大的 GEMM 逆差项显著收窄（AR 形状 gemm 对 vendor 从 2.2× 缩到 1.7×），skew 基准复测是下一步。
+
+## 11. S11 记录：拷贝引擎多流探测、事件税与 MPC 重定型
+
+背景：审计新版上游（triton-3.7 时代）发现 AG producer 用多流扇出（`cp_engine_producer_all_gather_full_mesh_push_multi_stream`）——若本平台拷贝引擎有 ≥2 条物理队列，这就是 S9 八卡扇出墙（17-25 GB/s/rank）的对症杠杆。两轮探针 + 一次回退根因分析，全部落库。
+
+### S11.1 并发矩阵（bench/s11_probe_multistream.py，2 卡对推，GB/s 聚合）
+
+| B × k | serial（一条流） | k 条流 | 双工（双方 k 流对推） |
+|---|---|---|---|
+| 1MB × 8 | 21.7 | 21.2 | 20.9 |
+| 2MB × 8 | 33.9 | 34.8 | 33.5 |
+| 4MB × 4 | 54.2 | 62.8 | 62.5 |
+| 8MB × 8 | 107.8 | **125.0** | 126.3 |
+| 32MB × 2 | **83.2（病态）** | **129.9** | 129.4 |
+
+判决五条：
+1. **并发真实**：≥4MB 且 ≥2 个 op 时多流聚合 +8-16%（`hipDeviceAttributeAsyncEngineCount` 返回 -1，驱动未暴露，但带宽数据是真的）；
+2. **单流病态**：两个 32MB op 挤一条流只有 83 GB/s，低于单 op 的 107——大 op 同流互相拖，扇出场景多 op 单流是自伤；
+3. **≤2MB 死区**：每-op 开销地板 ~21-33 GB/s，流数无关；
+4. **双工免费**：双方同时对推不降速；
+5. **单 op 带宽台阶**：2→4→8→32MB = 22→46→70→107 GB/s——op 越大越快，"少而大"优于"多而小"。
+
+### S11.2 事件税：第一次集成回退的根因（bench/s11_probe_evtax.py）
+
+第一次集成用 torch 的 `wait_stream` 做 fork/join，**2 卡全格回退**（AG mpc256 push 0.468→0.855 ms，RS scatter 0.131→0.270 ms）——探针矩阵没有暴露这一点，因为探针直接在流上发拷贝、per-stream synchronize 收尾，没有事件编排。差值折算：**每次 torch `wait_stream` ≈ 10-40 µs host**。分离变量（8MB，GB/s）：
+
+| k | serial | streams（裸发+各流sync） | evfork（torch 事件编排） | rawev（裸 hipEvent） |
+|---|---|---|---|---|
+| 2 | 99.5 | 106.6 | 76.5 | 97.0 |
+| 8 | 114.5 | 137.4 | 104.5 | **132.8** |
+
+torch 事件编排把 +20% 的并发收益吃成 −9%；裸 `hipEventRecord`/`hipStreamWaitEvent`（`HIP_EVENT_DISABLE_TIMING`）每次 1-4 µs，保住 ~90% 收益。**教训（新传输面事实）：DTK 上跨流编排必须走裸 hip 事件；torch 的 stream/event 封装每次调用贵一个数量级，µs 级收益的编排会被它整个吃掉。**
+
+### S11.3 集成（common_ops.fan_out_memcpy_async，AG/RS/AR push 全接入）
+
+- 侧流池（`TD_PUSH_STREAMS`，默认 8）+ 裸事件 fork/join；join 之后当前流在流序上位于全部拷贝之后——AG 的 host putmem/engine flag、RS 的落地 barrier、AR 的 `ev_d` 信号契约原样保持（强制开启验证：ag/rs/ar 3/3 PASS，`TD_PUSH_MIN_OPS=1` + `TEST_MPC=1024`）。
+- **启用门槛：≥4 个 op 且每个 ≥4MB**（生产默认下只有 ≥8 卡扇出形状满足；2 卡生产路径与原实现逐字节等价地走串行）。
+- `TD_PUSH_STREAMS=1` 全局关闭（A/B 旋钮）；`TD_PUSH_MIN_OPS` 仅测试用。
+- 回退证据保留：`bench/results/s4_s11_pool.json`（torch 事件版全面回退）vs `s4_s11_pre_pool.json`（基线）。
+
+### S11.4 MPC 重定型：AG 甜点不是 512，是单 chunk
+
+Post-S10 同场扫参（Mpr2048_K2048_N2048，`bench/results/s4_s11_pre_pool.json` ag_mpc 段）：mpc128/256/512/1024/2048 = 1.402/1.139/1.028/0.917/**0.884** ms——单调偏好大 chunk，与 S11.1 的单 op 台阶同构；consumer 流水线损失（gemm 0.466→0.491）远小于 push 收益（0.749→0.205）。旧文档"甜点 512"作废（S5 时代的数字与文字本来就不自洽）。AG_SHAPES 重定型为单 chunk（`bench/results/s4_s11_final.json`，p50 ms）：
+
+| 形状 | mpc256 旧 | 单 chunk 新 | Δ |
+|---|---|---|---|
+| Mpr2048_K2048_N2048 | 1.124 | **0.907**（mpc2048） | **−19%** |
+| Mpr1024_K4096_N8192 | 1.884 | **1.753**（mpc1024） | −7% |
+| Mpr1024_K8192_N1024 | 1.053 | 1.034（mpc1024） | −2%：16.8MB 单 op 实测仅 60 GB/s（低于 8MB 的 70，大 op 不再涨），且单 chunk 让 consumer 等整块才动 peer tile，重叠变差 |
+| Mpr512_K4096_N4096 | 0.925 | 0.895（mpc512） | −3% |
+| decode Mpr128_K4096 | 0.608 | 0.622 | 不变（MPC 已是 M_pr 上限） |
+
+**规则：MPC = M_per_rank（每 dest 单 op）**；chunk 尺寸落在 2MB 死区或 1MB 地板的配置都是在给引擎的每-op 开销交税。
+
+### S11.5 对八卡的意义（待 8 卡环境复测）
+
+- 流池的启用条件（≥4 op × ≥4MB）恰好就是八卡 (R-1)-dest 扇出的形状——7 个 8-17MB op，按探针应在串行基础上 +10-16%，叠加"单流大 op 互拖"病态的消除（S9 的 17-25 GB/s/rank 里可能有自伤成分，真实 fabric 上限可能更高）；
+- a2a dispatch push（每 dest 一整段）同构，是下一个接入点；
+- 八卡复测清单：AG/AR/RS/a2a 全套 + `TD_PUSH_STREAMS=1` A/B + 单 chunk MPC。

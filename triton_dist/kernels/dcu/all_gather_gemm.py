@@ -48,6 +48,7 @@ from pydushmem import device as dushmem_dev
 from triton_dist.kernels.dcu.common_ops import (
     SymmBarrier,
     dcu_state,
+    fan_out_memcpy_async,
     hip,
     init_dcu,
     memcpy_async,
@@ -278,12 +279,19 @@ class AGPushKernel:
         dests = [d for i in range(self._num_ranks)
                  for d in [(my_rank + i) % self._num_ranks]
                  if d != my_rank]  # nearest peers first
+        ops = []
         for d in dests:
             dst0 = self._peer_ws[d] + shard_off
             for c in range(m_chunk_num):
-                memcpy_async(dst0 + c * self._chunk_bytes,
-                             a_base + c * self._chunk_bytes,
-                             self._chunk_bytes, stream)
+                ops.append((dst0 + c * self._chunk_bytes,
+                            a_base + c * self._chunk_bytes,
+                            self._chunk_bytes))
+        # S11: fan the (dest, chunk) copies out across the push-stream pool
+        # (upstream cp_engine_*_multi_stream idea) -- forked from/joined to
+        # the current (ag) stream, so both signal transports below stay
+        # ordered behind ALL of them. No-op at 2 cards (<=4 ops of <=2MB);
+        # the payoff is the 8-card (R-1)-dest fan-out.
+        fan_out_memcpy_async(ops)
         # Signal transport (S5 tail-latency experiment; the flag write must
         # reach the peer AFTER its data copies). "engine" keeps the S4
         # default: one stream-ordered engine memcpy per dest. The observed

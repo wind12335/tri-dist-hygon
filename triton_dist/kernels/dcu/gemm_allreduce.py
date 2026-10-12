@@ -63,9 +63,9 @@ import triton.language as tl
 from triton_dist.kernels.dcu.common_ops import (
     SymmBarrier,
     dcu_state,
+    fan_out_memcpy_async,
     hip,
     init_dcu,
-    memcpy_async,
 )
 
 
@@ -213,15 +213,18 @@ class ARPushKernel:
         before any ev_data event the signals are ordered behind."""
         self._stage.fill_(round)
 
-    def push_chunk(self, c, my_rank, chunk_elems, stream_handle):
-        """Engine data copies of chunk c into every peer's slot for me."""
+    def push_chunk(self, c, my_rank, chunk_elems):
+        """Engine data copies of chunk c into every peer's slot for me.
+
+        S11: fanned out across the push-stream pool. Must be called with
+        the ar stream CURRENT and after the chunk's GEMM event was waited
+        on it -- the pool forks from and joins back to the current stream,
+        so the caller's ev_data record stays ordered behind every copy."""
         off = (my_rank * self._slot_elems + c * chunk_elems) * self._elemsz
         nbytes = chunk_elems * self._elemsz
-        for d in range(self._num_ranks):
-            if d == my_rank:
-                continue
-            memcpy_async(self._peer_ws[d] + off, self._ws + off, nbytes,
-                         stream_handle)
+        fan_out_memcpy_async([
+            (self._peer_ws[d] + off, self._ws + off, nbytes)
+            for d in range(self._num_ranks) if d != my_rank])
 
     def signal_all(self, round, my_rank, m_chunk_num):
         """One blocking putmem of this op's whole flags row to every peer
@@ -397,8 +400,7 @@ def gemm_ar_intra_node_op(a, b, c, ctx, component="full"):
             # chunk's GEMM -- chunk c's push runs under chunk c+1's GEMM
             with torch.cuda.stream(ctx.ar_stream):
                 ctx.ar_stream.wait_event(ev)
-                ctx.push.push_chunk(c_idx, rank, chunk_elems,
-                                    ctx.ar_stream.cuda_stream)
+                ctx.push.push_chunk(c_idx, rank, chunk_elems)
                 ev_d = torch.cuda.Event()
                 ev_d.record(ctx.ar_stream)
             evs_data.append(ev_d)
