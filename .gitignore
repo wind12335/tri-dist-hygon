@@ -25,3 +25,6 @@ tcache*/
 
 # crash dumps from failed runs (never commit)
 core.*
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
