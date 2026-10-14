@@ -1,0 +1,36 @@
+{
+  "note": "PARTIAL -- user stopped the run after shape 0 (2026-10-13). Values transcribed from bench/results/s15_final_2card_bw1000_partial.log (rank 0, mean/p50/min ms, WARMUP=5 ITERS=15). Shape 1 (M8192 K12288 N49152) skipped. AG tr: correctness assert PASSED in-run at M8192/K8192/N28672, but the timing loop stalled device-side in the bench context (after AR+RS sections ran in the same process); standalone single-op AG at this shape runs correct (tests/dbg_ag_tr.py, max_diff 6e-5) -- AG timing row pending a future fix/rerun.",
+  "env": {"cards": "2xBW1000 (card3/card5)", "dtk": "26.04", "dtype": "fp16",
+          "world": 2, "tol": 0.1},
+  "shape0": {
+    "shape": {"M": 8192, "K": 8192, "N": 28672},
+    "ar": {
+      "corr": 0.00024,
+      "rd":        {"mean": 33.48, "p50": 33.48, "min": 32.82},
+      "s6":        {"mean": 41.80, "p50": 41.79, "min": 41.63},
+      "dist_seq":  {"mean": 14.77, "p50": 14.74, "min": 14.57},
+      "rd_gemm":   {"mean": 29.74, "p50": 29.61, "min": 27.80},
+      "speedup_rd_vs_s6": 1.25
+    },
+    "rs": {
+      "corr": 0.00024,
+      "v5":        {"mean": 31.11, "p50": 31.07, "min": 30.89},
+      "s6":        {"mean": 23.43, "p50": 23.43, "min": 23.32},
+      "dist_seq":  {"mean": 12.98, "p50": 12.96, "min": 12.83},
+      "v5_gemm":   {"mean": 24.20, "p50": 24.18, "min": 24.09},
+      "speedup_v5_vs_s6": 0.75
+    },
+    "ag": {
+      "corr": "PASS (<0.1, value unprinted)",
+      "tr": "stalled in bench context (see note)",
+      "s6": "not reached",
+      "dist_seq": "not reached"
+    }
+  },
+  "history": {
+    "rs_v5_progression_ms": {"host_memcpy_ack_wedged": null,
+                              "kernel_ack_first_version": 39.42,
+                              "kernel_ack_followup_kernel": 31.11},
+    "rs_steady_sms": "auto = clamp(tiles//4, 6, 24); fixed-6 gave 39.42 at this shape"
+  }
+}

@@ -472,8 +472,9 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
             num_warps=_CONSUMER_WARPS,
             # S10 (tune_gemm2 + s4 A/B): s1 wins 6-8% on big/mid shapes,
             # loses on decode (M<=256) -- same M-threshold as the plain
-            # kernel in gemm_reduce_scatter.matmul_local.
-            num_stages=1 if M > 512 else 2,
+            # kernel in gemm_reduce_scatter.matmul_local. Deep-K guard from
+            # the gemm_ar_rd form: s1-on-deepK (K>=8192) is catastrophic.
+            num_stages=1 if (M > 512 and K < 8192) else 2,
         )
 
     current_stream.wait_stream(ctx.gemm_stream)

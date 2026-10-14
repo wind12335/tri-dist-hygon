@@ -531,3 +531,39 @@ Post-S10 同场扫参（Mpr2048_K2048_N2048，`bench/results/s4_s11_pre_pool.jso
 1. **扇出墙（17-25 GB/s/rank）是 fabric 瓶颈，不是本地队列瓶颈**。2 卡探针的 +16% 是专用点对点链路上的富余；8 卡 8 rank × 7 出流并发突发时 fabric 已无闲置带宽可解锁，4MB op 并发反而 −9%。多流池这条路在当前互联上**关闭**（默认 `TD_PUSH_STREAMS=1`，机制与探针数据保留，换有按链路富余的互联时再开）。
 2. **AG 单 chunk MPC 完整迁移到八卡：M2048 4.15→3.15（−24%）**，是本轮八卡唯一实质改进；对 RCCL 倍数 3.4×→2.6×。
 3. 八卡剩余差距回到 S9 的判断：要追 RCCL 只剩环形/分层扇出（对齐其 ring 摊销）与 barrier/固定开销瘦身（0.21-0.26ms/轮）两条路；AR 2048²（7.5×）是最极端案例。
+
+---
+
+## 12. S17 记录：大形状实测 M8192 N28672 K8192（用户点名，2 卡同场 A/B）
+
+`bench/s16_bench_bigshape.py` → `bench/results/s16_bigshape_2card.json`
+（fp16，M_pr=4096，N_pr=28672，K=8192，每 rank 3.85 TFLOP，p50 ms）：
+
+| 臂 | p50 | vs 基线 |
+|---|---|---|
+| **RCCL allgather + vendor GEMM 串行（基线）** | **11.30** | 1.00× |
+| └ 组件：RCCL ag 0.80（84 GB/s）+ vendor gemm 10.52（367 TFLOPS）| | |
+| push_path（S11 线，mpc=M_pr 单 chunk）| **36.5** | 0.31× |
+| s14（tr pull 线，chunk 512×8）| 40.1 | 0.28× |
+| i1（verify OFF）| 43.8 | 0.26× |
+| i1（verify ON，现役完整栈）| 45.6 | 0.25× |
+| └ 组件：consumer gemm 38.6（99 TFLOPS）| | |
+
+**差距 100% 在 GEMM 代码生成，不在通信**：RCCL 的 allgather 只占基线
+0.8/11.3，我们的 pull 重叠后几乎全藏；分解链 vendor 10.5 → plain
+triton 21.1（tune_gemm2 同形状 128×128×64/w4/s2/g8 = 172 TFLOPS，
+0.50×）→ **consumer 形态 38.6（1.83× 于 plain，新量化的优化主线索**：
+spin 门 + 对称堆 A 读 + chunk 门控在此形状的代价；小形状时 ≈plain）。
+verify 税此形状 +1.8-2.6ms（+4-6%，随 K 增大相对缩小，符合预测）；
+s14 vs i1_v0 差 ±3ms 跨跑翻号 = run 间方差，非系统性。
+
+**顺手修掉的真 bug**：AG 两个 consumer（`gemm_ag_tr.py`、
+`all_gather_gemm.py`）的 num_stages 规则写成了退化版
+`M>512`（丢了 gemm_ar_rd 已有的 `K<8192` deep-K 守卫）→ K=8192 落到
+catastrophic s1。补守卫后 consumer 45→38.6（−14%）。该 bug 同时影响
+S11 表里 Mpr1024_K8192_N1024 格（历史数字偏低 ~13%）。
+
+**风险备忘**：run1（ITERS=15 自由跑）在 s14 计时环 wedge 一次
+（双 rank 108% CPU 无进展，rig19 式）；ITERS=5 两轮全过。n_chunks=8
+（此形状 auto=512 行×8 chunk）下的自由跑轮次稳健性未经浸泡——
+生产使用前需 600 轮起浸泡（DBG 形状 n_chunks=2 已 0/7200）。

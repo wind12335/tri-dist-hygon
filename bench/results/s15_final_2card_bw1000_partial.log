@@ -1,0 +1,26 @@
+[rank 1] torch.distributed GPU backend: nccl
+[rank 0] torch.distributed GPU backend: nccl
+[rank 0] M8192_K8192_N28672: ref built in 3.2s (2.4GB peak)
+[rank 0] M8192_K8192_N28672 AR rd ctx: CR=256 chunks=32 slots=4
+[rank 0] M8192_K8192_N28672 AR corr=2.4e-04
+[rank 0]   AR rd            33.48/    33.48/    32.82
+[rank 0]   AR s6            41.80/    41.79/    41.63
+[rank 0]   AR dist_seq      14.77/    14.74/    14.57
+[rank 0]   AR rd_gemm       29.74/    29.61/    27.80
+[rank 1] M8192_K8192_N28672 AR corr=2.4e-04
+[rank 1]   AR rd            33.49/    33.49/    32.89
+[rank 1]   AR s6            41.80/    41.79/    41.62
+[rank 1]   AR dist_seq      14.77/    14.74/    14.57
+[rank 1]   AR rd_gemm       30.40/    30.45/    29.04
+[rank 0] M8192_K8192_N28672 RS v5 ctx: CR=256 chunks=16 slots=4
+[rank 1] M8192_K8192_N28672 RS corr=2.4e-04
+[rank 1]   RS v5            31.13/    31.08/    30.91
+[rank 1]   RS s6            23.44/    23.42/    23.32
+[rank 1]   RS dist_seq      12.98/    12.96/    12.81
+[rank 1]   RS v5_gemm       24.15/    24.16/    24.07
+[rank 0] M8192_K8192_N28672 RS corr=2.4e-04
+[rank 0]   RS v5            31.11/    31.07/    30.89
+[rank 0]   RS s6            23.43/    23.43/    23.32
+[rank 0]   RS dist_seq      12.98/    12.96/    12.83
+[rank 0]   RS v5_gemm       24.20/    24.18/    24.09
+[rank 0] M8192_K8192_N28672 AG tr ctx: CR=512 chunks=8 lanes=2
