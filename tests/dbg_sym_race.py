@@ -120,8 +120,7 @@ for it in range(ITERS):
     i1.kernel_gemm_ag_tr_consumer_pred[(grid_c, 1, 1)](
         ag.ws_ptr, a, b, c,
         M, N, K,
-        K, 1,
-        a.stride(0), a.stride(1),
+        K,  # single A row stride
         b.stride(1), b.stride(0),
         c.stride(0), c.stride(1),
         0, R, n_chunks,

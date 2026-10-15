@@ -83,8 +83,7 @@ for arm, grid_c, use_diag in (("A", min(M // _CONSUMER_BLOCK_M * N // _CONSUMER_
             b,
             c,
             M, N, K,
-            K, 1,
-            a.stride(0), a.stride(1),
+            K,  # single A row stride
             b.stride(1), b.stride(0),
             c.stride(0), c.stride(1),
             0,                       # rank
@@ -103,7 +102,7 @@ for arm, grid_c, use_diag in (("A", min(M // _CONSUMER_BLOCK_M * N // _CONSUMER_
             EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
             DIAG=use_diag,
             num_warps=_CONSUMER_WARPS,
-            num_stages=1 if M > 512 else 2,
+            num_stages=1 if (M > 512 and K < 8192) else 2,  # S17 deep-K guard
         )
         torch.cuda.synchronize()
         d = (c.float() - ref).abs()

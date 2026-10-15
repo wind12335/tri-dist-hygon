@@ -1,0 +1,19 @@
+{
+ "M": 8192,
+ "N": 29568,
+ "K": 8192,
+ "arms": {
+  "restructured A=int64VA": {
+   "p50": 25.232,
+   "md": 0.0001220703125
+  },
+  "restructured A=tensor": {
+   "p50": 26.527,
+   "md": 0.0001220703125
+  },
+  "orig consumer (same-process ref)": {
+   "p50": 30.724,
+   "md": 0.0001220703125
+  }
+ }
+}

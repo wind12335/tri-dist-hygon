@@ -1,0 +1,19 @@
+{
+ "M": 8192,
+ "N": 29568,
+ "K": 8192,
+ "arms": {
+  "prod: grid128 persistent s2 (S17 rule)": {
+   "p50": 39.328,
+   "md": 0.0001220703125
+  },
+  "ref:   grid128 persistent s1 (S18 degenerate)": {
+   "p50": 31.485,
+   "md": 0.0001220703125
+  },
+  "ref:   full-grid one-tile s2": {
+   "p50": 25.881,
+   "md": 0.0001220703125
+  }
+ }
+}

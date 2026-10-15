@@ -101,10 +101,7 @@ def kernel_gemm_ag_tr_consumer(
         M,
         N,
         K,
-        stride_am,
-        stride_ak,
-        stride_lam,
-        stride_lak,
+        stride_k,  # single A row stride: ws and shard are both [*, K] contig
         stride_bk,
         stride_bn,
         stride_cm,
@@ -119,119 +116,118 @@ def kernel_gemm_ag_tr_consumer(
         BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
         M_PER_CHUNK: tl.constexpr,
-        NUM_SMS: tl.constexpr,  # == launched grid (loop step)
         EVEN_K: tl.constexpr,
 ):
+    """S19c-restructured consumer: same semantics as the original (per-
+    chunk ticket gate, own-first rank swizzle, dual A source) but the
+    dual source is a SCALAR-ONLY branch -- base pointer + row bias --
+    so the k-loop compiles ONE addressing form. Measured 30.7 -> 25.2ms
+    at M8192 N29568 K8192 (the old two-live-forms dual path cost 5ms).
+    Also: fused tl.dot accumulator, no vestigial tile loop (launch grid
+    == tiles), no store-side modulo recompute."""
     pid = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
+    tile_id = pid  # launch always uses NUM_SMS == tiles: one tile per CTA
 
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
-    tl.assume(stride_bn > 0)
     tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
     M_per_rank = M // world_size
     pid_m_per_rank = tl.cdiv(M_per_rank, BLOCK_SIZE_M)
 
-    acc_dtype = tl.float32
     A_ptr = A.to(tl.pointer_type(localA.dtype.element_ty))
     flag_ptr = flags_base.to(tl.pointer_type(tl.int32))
 
-    for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = tile_id // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+    pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # rank swizzle (upstream): visit my own (already-local) rows first
-        num_pid_m_per_copy_chunk = M_PER_CHUNK // BLOCK_SIZE_M
-        chunk_offset = pid_m // (num_pid_m_per_copy_chunk * world_size)
-        rank_offset = pid_m % (num_pid_m_per_copy_chunk * world_size) // num_pid_m_per_copy_chunk
-        block_offset = pid_m % num_pid_m_per_copy_chunk
+    # rank swizzle (upstream): visit my own (already-local) rows first
+    num_pid_m_per_copy_chunk = M_PER_CHUNK // BLOCK_SIZE_M
+    chunk_offset = pid_m // (num_pid_m_per_copy_chunk * world_size)
+    rank_offset = pid_m % (num_pid_m_per_copy_chunk * world_size) // num_pid_m_per_copy_chunk
+    block_offset = pid_m % num_pid_m_per_copy_chunk
 
-        rank_offset = (rank_offset + rank) % world_size
-        pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK +
-                 block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
+    rank_offset = (rank_offset + rank) % world_size
+    pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK +
+             block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
 
-        offs_am = pid_m * BLOCK_SIZE_M
-        # global chunk id == source_rank * m_chunk_num + chunk: exactly the
-        # slot my pull lane flags after the data landed (LOCAL memory)
-        offs_sig = offs_am // M_PER_CHUNK
-        offs_rank = pid_m // pid_m_per_rank
+    offs_am = pid_m * BLOCK_SIZE_M
+    # global chunk id == source_rank * m_chunk_num + chunk: exactly the
+    # slot my pull lane flags after the data landed (LOCAL memory)
+    offs_sig = offs_am // M_PER_CHUNK
+    offs_rank = pid_m // pid_m_per_rank
 
-        if offs_rank != rank:
-            # per-chunk ticket: expected = round_base + ck + 1 where
-            # ck = offs_sig % m_chunk_num (offs_sig = src * nchunks + ck).
-            # Hybrid spin on the LOCAL flag (volatile batches as delay,
-            # rare atomic probe at the L2 coherence point for forward
-            # progress -- the all_gather_gemm consumer plane; here the
-            # flag is written by MY OWN lane's engine op, so it is fully
-            # coherent at L2 for the atomic probe).
-            expected = round + 1 + offs_sig % m_chunk_num
-            fp = flag_ptr + offs_sig
-            v = tl.atomic_add(fp, 0)
-            while v < expected:
-                for _ in range(128):
-                    v = tl.load(fp, volatile=True)
-                if v < expected:
-                    v = tl.atomic_add(fp, 0)
+    if offs_rank != rank:
+        # per-chunk ticket: expected = round_base + ck + 1 where
+        # ck = offs_sig % m_chunk_num (offs_sig = src * nchunks + ck).
+        # Hybrid spin on the LOCAL flag (volatile batches as delay,
+        # rare atomic probe at the L2 coherence point for forward
+        # progress -- the all_gather_gemm consumer plane; here the
+        # flag is written by MY OWN lane's engine op, so it is fully
+        # coherent at L2 for the atomic probe).
+        expected = round + 1 + offs_sig % m_chunk_num
+        fp = flag_ptr + offs_sig
+        v = tl.atomic_add(fp, 0)
+        while v < expected:
+            for _ in range(128):
+                v = tl.load(fp, volatile=True)
+            if v < expected:
+                v = tl.atomic_add(fp, 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    rk = tl.arange(0, BLOCK_SIZE_K)
+    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        if offs_rank == rank:
-            rm = rm % M_per_rank
-            A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            a_kstride = stride_lak
-        else:
-            A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a_kstride = stride_ak
+    # dual source as a SCALAR-ONLY branch: own tiles read the local
+    # shard (skip-local split, no staging wait), peer tiles the gathered
+    # ws. Both sources share row stride K, so the row bias alone selects
+    # coordinates -- the k-loop below sees one addressing form.
+    if offs_rank == rank:
+        a_base = localA
+        row_bias = rank * M_per_rank  # shard rows sit at rm - bias in localA
+    else:
+        a_base = A_ptr
+        row_bias = 0
 
+    A_BASE = a_base + (rm - row_bias)[:, None] * stride_k + rk[None, :]
+    B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+
+    loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+    if not EVEN_K:
+        loop_k -= 1
+
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, loop_k):
+        a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+        b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+        acc = tl.dot(a, b, acc)
+        A_BASE += BLOCK_SIZE_K
+        B_BASE += BLOCK_SIZE_K * stride_bk
+
+    if not EVEN_K:
+        k = loop_k
+        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        A_BASE = a_base + (rm - row_bias)[:, None] * stride_k + rk[None, :]
+        A_BASE = tl.multiple_of(A_BASE, (1, 16))
+        B_BASE = tl.multiple_of(B_BASE, (16, 1))
+        a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
+        b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
+        acc = tl.dot(a, b, acc)
 
-        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-        if not EVEN_K:
-            loop_k -= 1
-
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for k in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
-            b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
-            acc += tl.dot(a, b)
-            A_BASE += BLOCK_SIZE_K * a_kstride
-            B_BASE += BLOCK_SIZE_K * stride_bk
-
-        if not EVEN_K:
-            k = loop_k
-            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            if offs_rank == rank:  # rm is already the local-shard mapping
-                A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            else:
-                A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            A_BASE = tl.multiple_of(A_BASE, (1, 16))
-            B_BASE = tl.multiple_of(B_BASE, (16, 1))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
-            acc += tl.dot(a, b)
-
-        c = acc.to(C.dtype.element_ty)
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, c_mask)
+    c_ = acc.to(C.dtype.element_ty)
+    c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+    C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+    tl.store(C_, c_, c_mask)
 
 
 @dataclasses.dataclass
@@ -457,6 +453,11 @@ def gemm_ag_tr_op(a, b, c, ctx, component="full"):
     with torch.cuda.stream(ctx.consumer_stream):
         tiles = (triton.cdiv(M, _CONSUMER_BLOCK_M)
                  * triton.cdiv(N_pr, _CONSUMER_BLOCK_N))
+        # S19c single-form addressing: ws [max_M,K] and shard [m_pr,K]
+        # share row stride K, k stride 1 -- assert what the kernel now
+        # assumes instead of passing 4 strides it would fold anyway
+        assert a.stride(0) == K and a.stride(1) == 1, \
+            "localA must be a contiguous [m_pr, K] shard"
         kernel_gemm_ag_tr_consumer[(tiles,)](
             ctx.ws_ptr,
             a,
@@ -465,8 +466,7 @@ def gemm_ag_tr_op(a, b, c, ctx, component="full"):
             M,
             N_pr,
             K,
-            K, 1,  # gathered workspace [max_M, K] contiguous
-            a.stride(0), a.stride(1),  # localA (a) strides
+            K,  # single A row stride (ws and shard both [*, K] contig)
             b.stride(1), b.stride(0),  # b is [N, K]
             c.stride(0), c.stride(1),
             rank,
@@ -479,7 +479,6 @@ def gemm_ag_tr_op(a, b, c, ctx, component="full"):
             BLOCK_SIZE_K=_CONSUMER_BLOCK_K,
             GROUP_SIZE_M=_CONSUMER_GROUP_M,
             M_PER_CHUNK=CR,
-            NUM_SMS=tiles,
             EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
             num_warps=_CONSUMER_WARPS,
             # S10 rule WITH the deep-K guard (gemm_ar_rd form): s1-on-deepK

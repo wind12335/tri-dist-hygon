@@ -288,10 +288,7 @@ def kernel_gemm_ag_tr_consumer_pred(
         M,
         N,
         K,
-        stride_am,
-        stride_ak,
-        stride_lam,
-        stride_lak,
+        stride_k,  # single A row stride: ws and shard are both [*, K] contig
         stride_bk,
         stride_bn,
         stride_cm,
@@ -322,8 +319,7 @@ def kernel_gemm_ag_tr_consumer_pred(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
+    tl.assume(stride_k > 0)
     tl.assume(stride_bn > 0)
     tl.assume(stride_bk > 0)
     tl.assume(stride_cm > 0)
@@ -426,13 +422,15 @@ def kernel_gemm_ag_tr_consumer_pred(
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
+        # S19c restructure: dual source as a SCALAR-ONLY branch (base
+        # pointer + row bias) so the k-loop compiles ONE addressing form
         if offs_rank == rank:
-            rm = rm % M_per_rank
-            A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            a_kstride = stride_lak
+            a_base = localA
+            row_bias = rank * M_per_rank  # shard row = rm - bias
         else:
-            A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a_kstride = stride_ak
+            a_base = A_ptr
+            row_bias = 0
+        A_BASE = a_base + (rm - row_bias)[:, None] * stride_k + rk[None, :]
 
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
@@ -444,18 +442,16 @@ def kernel_gemm_ag_tr_consumer_pred(
         for k in range(0, loop_k):
             a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
             b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
-            acc += tl.dot(a, b)
-            A_BASE += BLOCK_SIZE_K * a_kstride
+            acc = tl.dot(a, b, acc)
+            A_BASE += BLOCK_SIZE_K
             B_BASE += BLOCK_SIZE_K * stride_bk
 
         if not EVEN_K:
             k = loop_k
             rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            if offs_rank == rank:  # rm is already the local-shard mapping
-                A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            else:
-                A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
+            A_BASE = (a_base + (rm - row_bias)[:, None] * stride_k
+                      + rk[None, :])
             A_BASE = tl.multiple_of(A_BASE, (1, 16))
             B_BASE = tl.multiple_of(B_BASE, (16, 1))
             a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
@@ -463,10 +459,6 @@ def kernel_gemm_ag_tr_consumer_pred(
             acc += tl.dot(a, b)
 
         c = acc.to(C.dtype.element_ty)
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
@@ -975,6 +967,9 @@ def i1_ag_tr_op(a, b, c, ictx, stage_delay_us=0.0, with_observer=True):
         tiles = (triton.cdiv(M, _CONSUMER_BLOCK_M)
                  * triton.cdiv(N_pr, _CONSUMER_BLOCK_N))
         grid_c = min(tiles, _CONSUMER_GRID_CAP)
+        # S19c single-form addressing (see gemm_ag_tr.py): one A row stride
+        assert a.stride(0) == K and a.stride(1) == 1, \
+            "localA must be a contiguous [m_pr, K] shard"
         kernel_gemm_ag_tr_consumer_pred[(grid_c, 1, 1)](
             ag.ws_ptr,
             a,
@@ -983,8 +978,7 @@ def i1_ag_tr_op(a, b, c, ictx, stage_delay_us=0.0, with_observer=True):
             M,
             N_pr,
             K,
-            K, 1,  # gathered workspace [max_M, K] contiguous
-            a.stride(0), a.stride(1),  # localA (a) strides
+            K,  # single A row stride (ws and shard both [*, K] contig)
             b.stride(1), b.stride(0),  # b is [N, K]
             c.stride(0), c.stride(1),
             rank,
@@ -1004,6 +998,12 @@ def i1_ag_tr_op(a, b, c, ictx, stage_delay_us=0.0, with_observer=True):
             EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
             DIAG=(ictx.diag_buf is not None),
             num_warps=_CONSUMER_WARPS,
+            # M-only s1 rule is CORRECT for this PERSISTENT launch (s19e
+            # @M8192 N29568 K8192: grid128 s1 31.5ms vs s2 39.3ms -- at
+            # 64KB/CTA only ~80 of 128 CTAs fit resident, 1.6 waves).
+            # The S17 deep-K guard (s2 at K>=8192) applies to the
+            # FULL-GRID consumer form (gemm_ag_tr.py); there tiles>grid
+            # only at small M, which this rule already gives s2.
             num_stages=1 if M > 512 else 2,
         )
         # verify (stream-ordered behind the consumer): spot-recompute
