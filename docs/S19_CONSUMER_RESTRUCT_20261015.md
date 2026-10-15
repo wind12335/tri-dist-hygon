@@ -42,6 +42,21 @@ grid 封顶 128 是为了给 pull lanes/observer 留 CU）同法重构：
   （tiles>128 ⟺ M 大），**保留 M-only 规则**——给 ag_tr_pred 加 S17 guard 是
   回归，已测已撤（今日踩坑）。
 
+## 第三只 consumer：base AG push（all_gather_gemm.py，s19h/s19i）
+
+同配方（标量双源 + 单 stride_k + 融合 acc + 去循环/去重算），u64 旗标语义保留：
+满格 **30.70 → 25.06/26.58 = −15~18%**（s19i 同进程 A/B×2），EVEN_K 尾段 6.1e-5。
+至此家族内三只 consumer-form kernel（gemm_ag_tr / ag_tr_pred / all_gather_gemm）全部重构。
+
+## 其他算子扫描结论（本节的动因）
+
+- **RS v5**（32.31）：tile 循环是 budget 封顶（承重）；已融合 acc；单 A 源 → S19 配方
+  无剩余可剥。差距 = plain codegen + 通信/编排。
+- **AR rd / s6 / pred 载体**（39.89 / 42.05 / 40.41）：三病灶全无。差距不在 kernel
+  结构。rd 的账面缺口最大（gemm≈21 + 面板交换≈3-6 vs 实测 39.9）——下一步应做
+  kernel-only/分相位分解定位（单卡可测计算 kernel；编排部分需 2 卡）。
+- **a2a**：已 3.2× 领先 RCCL，不动。
+
 ## 遗留
 
 - s19g（constexpr 折叠 world_size/rank/m_chunk_num）：25.55/27.12 vs 参考 26.18，

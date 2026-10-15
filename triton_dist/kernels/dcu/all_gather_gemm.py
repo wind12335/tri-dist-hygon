@@ -103,10 +103,7 @@ def kernel_gemm_ag_consumer(
         M,
         N,
         K,
-        stride_am,
-        stride_ak,
-        stride_lam,
-        stride_lak,
+        stride_k,  # single A row stride: ws and shard are both [*, K] contig
         stride_bk,
         stride_bn,
         stride_cm,
@@ -120,16 +117,19 @@ def kernel_gemm_ag_consumer(
         BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
         M_PER_CHUNK: tl.constexpr,
-        NUM_SMS: tl.constexpr,  # == launched grid (loop step)
         EVEN_K: tl.constexpr,
 ):
+    """S19c-restructured base-AG-push consumer (same recipe as
+    gemm_ag_tr.py): scalar-only dual-source branch, single addressing
+    form through the k-loop, fused accumulator, no tile loop (launch
+    grid == tiles), no store-side modulo recompute. The u64-flag hybrid
+    spin (low int32 word, expected == round) is verbatim upstream."""
     pid = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
+    tile_id = pid  # launch always uses NUM_SMS == tiles: one tile per CTA
 
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
+    tl.assume(stride_k > 0)
     tl.assume(stride_bn > 0)
     tl.assume(stride_bk > 0)
     tl.assume(stride_cm > 0)
@@ -143,99 +143,91 @@ def kernel_gemm_ag_consumer(
     # remote signal is a u64; spin on its LOW int32 word (round < 2^31)
     flag_ptr = flags_base.to(tl.pointer_type(tl.int32))
 
-    for tile_id in range(pid, total_tiles, NUM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = tile_id // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+    pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # rank swizzle (upstream): visit my own (already-local) rows first
-        num_pid_m_per_copy_chunk = M_PER_CHUNK // BLOCK_SIZE_M
-        chunk_offset = pid_m // (num_pid_m_per_copy_chunk * world_size)
-        rank_offset = pid_m % (num_pid_m_per_copy_chunk * world_size) // num_pid_m_per_copy_chunk
-        block_offset = pid_m % num_pid_m_per_copy_chunk
+    # rank swizzle (upstream): visit my own (already-local) rows first
+    num_pid_m_per_copy_chunk = M_PER_CHUNK // BLOCK_SIZE_M
+    chunk_offset = pid_m // (num_pid_m_per_copy_chunk * world_size)
+    rank_offset = pid_m % (num_pid_m_per_copy_chunk * world_size) // num_pid_m_per_copy_chunk
+    block_offset = pid_m % num_pid_m_per_copy_chunk
 
-        rank_offset = (rank_offset + rank) % world_size
-        pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK +
-                 block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
+    rank_offset = (rank_offset + rank) % world_size
+    pid_m = (rank_offset * M_per_rank + chunk_offset * M_PER_CHUNK +
+             block_offset * BLOCK_SIZE_M) // BLOCK_SIZE_M
 
-        offs_am = pid_m * BLOCK_SIZE_M
-        # global chunk id == source_rank * m_chunk_num + chunk: exactly the
-        # slot the source's producer signals
-        offs_sig = offs_am // M_PER_CHUNK
-        offs_rank = pid_m // pid_m_per_rank
+    offs_am = pid_m * BLOCK_SIZE_M
+    # global chunk id == source_rank * m_chunk_num + chunk: exactly the
+    # slot the source's producer signals
+    offs_sig = offs_am // M_PER_CHUNK
+    offs_rank = pid_m // pid_m_per_rank
 
-        if offs_rank != rank:
-            # wait for this source chunk's flag. The signal is an ENGINE
-            # write that updates this PE's L2 -- but a tight atomic_add(0)
-            # RMW spin keeps the line perpetually busy/dirty and can block
-            # the incoming update for tens of ms (up to ~1 s; S4 outlier
-            # probes: stalls land in the consumer phase only, after the
-            # push phase completed). Hybrid spin: a batch of volatile
-            # loads (pure delay + optimistic fast path; alone they can
-            # read stale DRAM forever) interleaved with a rare atomic
-            # probe at the L2 coherence point, which guarantees forward
-            # progress while leaving us-wide gaps for the engine write.
-            fp = flag_ptr + offs_sig * 2
-            v = tl.atomic_add(fp, 0)
-            while v < round:
-                for _ in range(128):
-                    v = tl.load(fp, volatile=True)
-                if v < round:
-                    v = tl.atomic_add(fp, 0)
+    if offs_rank != rank:
+        # wait for this source chunk's flag. The signal is an ENGINE
+        # write that updates this PE's L2 -- but a tight atomic_add(0)
+        # RMW spin keeps the line perpetually busy/dirty and can block
+        # the incoming update for tens of ms (up to ~1 s; S4 outlier
+        # probes: stalls land in the consumer phase only, after the
+        # push phase completed). Hybrid spin: a batch of volatile
+        # loads (pure delay + optimistic fast path; alone they can
+        # read stale DRAM forever) interleaved with a rare atomic
+        # probe at the L2 coherence point, which guarantees forward
+        # progress while leaving us-wide gaps for the engine write.
+        fp = flag_ptr + offs_sig * 2
+        v = tl.atomic_add(fp, 0)
+        while v < round:
+            for _ in range(128):
+                v = tl.load(fp, volatile=True)
+            if v < round:
+                v = tl.atomic_add(fp, 0)
 
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    rk = tl.arange(0, BLOCK_SIZE_K)
+    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        if offs_rank == rank:
-            rm = rm % M_per_rank
-            A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            a_kstride = stride_lak
-        else:
-            A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a_kstride = stride_ak
+    # dual source as a SCALAR-ONLY branch (S19c): one addressing form
+    if offs_rank == rank:
+        a_base = localA
+        row_bias = rank * M_per_rank  # shard rows sit at rm - bias in localA
+    else:
+        a_base = A_ptr
+        row_bias = 0
+    A_BASE = a_base + (rm - row_bias)[:, None] * stride_k + rk[None, :]
+    B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
+    loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+    if not EVEN_K:
+        loop_k -= 1
+
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+    for k in range(0, loop_k):
+        a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+        b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+        acc = tl.dot(a, b, acc)
+        A_BASE += BLOCK_SIZE_K
+        B_BASE += BLOCK_SIZE_K * stride_bk
+
+    if not EVEN_K:
+        k = loop_k
+        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        A_BASE = a_base + (rm - row_bias)[:, None] * stride_k + rk[None, :]
+        A_BASE = tl.multiple_of(A_BASE, (1, 16))
+        B_BASE = tl.multiple_of(B_BASE, (16, 1))
+        a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
+        b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
+        acc = tl.dot(a, b, acc)
 
-        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-        if not EVEN_K:
-            loop_k -= 1
-
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for k in range(0, loop_k):
-            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
-            b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
-            acc += tl.dot(a, b)
-            A_BASE += BLOCK_SIZE_K * a_kstride
-            B_BASE += BLOCK_SIZE_K * stride_bk
-
-        if not EVEN_K:
-            k = loop_k
-            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            if offs_rank == rank:  # rm is already the local-shard mapping
-                A_BASE = localA + rm[:, None] * stride_lam + rk[None, :] * stride_lak
-            else:
-                A_BASE = A_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            A_BASE = tl.multiple_of(A_BASE, (1, 16))
-            B_BASE = tl.multiple_of(B_BASE, (16, 1))
-            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
-            acc += tl.dot(a, b)
-
-        c = acc.to(C.dtype.element_ty)
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, c_mask)
+    c = acc.to(C.dtype.element_ty)
+    c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+    C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+    tl.store(C_, c, c_mask)
 
 
 class AGPushKernel:
@@ -446,6 +438,9 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
         # memcpys -- no SM reservation needed anymore.
         tiles = (triton.cdiv(M, _CONSUMER_BLOCK_M)
                  * triton.cdiv(N_per_rank, _CONSUMER_BLOCK_N))
+        # S19c single-form addressing (see gemm_ag_tr.py): one A row stride
+        assert a.stride(0) == K and a.stride(1) == 1, \
+            "localA must be a contiguous [m_pr, K] shard"
         kernel_gemm_ag_consumer[(tiles,)](
             ctx.ws_ptr,
             a,
@@ -454,8 +449,7 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
             M,
             N_per_rank,
             K,  #
-            K, 1,  # gathered workspace [max_M, K] contiguous
-            a.stride(0), a.stride(1),  # localA (a) strides
+            K,  # single A row stride (ws and shard both [*, K] contig)
             b.stride(1), b.stride(0),  # b is [N, K]
             c.stride(0), c.stride(1),  #
             rank,
@@ -467,7 +461,6 @@ def ag_gemm_intra_node_op(a, b, c, ctx, skip_comm=False):
             BLOCK_SIZE_K=_CONSUMER_BLOCK_K,
             GROUP_SIZE_M=_CONSUMER_GROUP_M,
             M_PER_CHUNK=ctx.M_PER_CHUNK,
-            NUM_SMS=tiles,
             EVEN_K=(K % _CONSUMER_BLOCK_K == 0),
             num_warps=_CONSUMER_WARPS,
             # S10 (tune_gemm2 + s4 A/B): s1 wins 6-8% on big/mid shapes,
