@@ -1,0 +1,30 @@
+{
+ "fam": "rs",
+ "M": 8192,
+ "N": 29568,
+ "K": 8192,
+ "warmup/iters": "2/5",
+ "arms": {
+  "gemm_torch": {
+   "mean": 11.06060562133789,
+   "p50": 11.03583812713623,
+   "min": 10.952797889709473
+  },
+  "base_s6": {
+   "SKIP": "Traceback (most recent call last):\n  File \"/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py\", line 129, in arm\n    r = setup_fn()\n        ^^^^^^^^^^\n  File \"/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py\", line 250, in a_s6\n    c6 = s6rs.gemm_rs_intra_node_op(a, b, DTYPE, rank, size, ctx)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/gemm_reduce_scatter.py\", line 235, in gemm_rs_intra_node_op\n    matmul_local(a, b, ctx.scratch)\nAssertionError\n"
+  },
+  "p1_v5": {
+   "mean": 32.245430374145506,
+   "p50": 32.311668395996094,
+   "min": 31.91103172302246,
+   "corr": 0.000244140625
+  },
+  "rccl_seq": {
+   "mean": 14.001148986816407,
+   "p50": 14.125275611877441,
+   "min": 13.47071647644043,
+   "corr": 0.000244140625
+  }
+ },
+ "p2_note": "no RS predictor exists (paper-#2 covers AG/AR)"
+}

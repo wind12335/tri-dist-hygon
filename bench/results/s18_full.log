@@ -1,0 +1,580 @@
+########## ar 12:41:26 ##########
+[rank 0] fam=ar dist ready
+[rank 1] fam=ar dist ready
+[rank 0] ref built 3.3s (2.5GB peak)
+[rank 0] gemm_torch warmup0 0.43s
+[rank 0] gemm_torch warmup1 0.01s
+[rank 0] gemm_torch it0 10.92 ms
+[rank 0] gemm_torch it1 10.93 ms
+[rank 0] gemm_torch it2 10.87 ms
+[rank 0] gemm_torch it3 10.90 ms
+[rank 0] gemm_torch it4 10.98 ms
+[rank 0] ==> gemm_torch p50 10.92 ms corr_md=0.00e+00
+[rank 1] ref built 4.1s (2.5GB peak)
+[rank 1] gemm_torch warmup0 0.44s
+[rank 1] gemm_torch warmup1 0.01s
+[rank 1] gemm_torch it0 11.04 ms
+[rank 1] gemm_torch it1 11.11 ms
+[rank 1] gemm_torch it2 11.24 ms
+[rank 1] gemm_torch it3 11.29 ms
+[rank 1] gemm_torch it4 11.10 ms
+[rank 1] ==> gemm_torch p50 11.11 ms corr_md=0.00e+00
+[rank 1] ar_s6 warmup0 0.32s
+[rank 0] ar_s6 warmup0 0.04s
+[rank 0] ar_s6 warmup1 0.04s
+[rank 1] ar_s6 warmup1 0.04s
+[rank 0] ar_s6 it0 42.01 ms
+[rank 1] ar_s6 it0 42.07 ms
+[rank 0] ar_s6 it1 42.05 ms
+[rank 1] ar_s6 it1 42.05 ms
+[rank 0] ar_s6 it2 42.14 ms
+[rank 1] ar_s6 it2 42.12 ms
+[rank 0] ar_s6 it3 42.00 ms
+[rank 1] ar_s6 it3 42.00 ms
+[rank 0] ar_s6 it4 42.16 ms
+[rank 1] ar_s6 it4 42.12 ms
+[rank 1] ==> base_s6 p50 42.07 ms corr_md=2.44e-04
+[rank 0] ==> base_s6 p50 42.05 ms corr_md=2.44e-04
+[rank 1] ar_rd warmup0 0.04s
+[rank 0] ar_rd warmup0 0.04s
+[rank 0] ar_rd warmup1 0.04s
+[rank 1] ar_rd warmup1 0.04s
+[rank 0] ar_rd it0 39.64 ms
+[rank 1] ar_rd it0 39.63 ms
+[rank 0] ar_rd it1 39.93 ms
+[rank 1] ar_rd it1 39.91 ms
+[rank 0] ar_rd it2 40.22 ms
+[rank 1] ar_rd it2 40.22 ms
+[rank 0] ar_rd it3 39.89 ms
+[rank 1] ar_rd it3 39.84 ms
+[rank 0] ar_rd it4 38.94 ms
+[rank 1] ar_rd it4 38.97 ms
+[rank 0] ==> p1_rd p50 39.89 ms corr_md=2.44e-04
+[rank 1] ==> p1_rd p50 39.84 ms corr_md=2.44e-04
+[rank 1] ar_pred warmup0 0.04s
+[rank 0] ar_pred warmup0 0.04s
+[rank 1] ar_pred warmup1 0.04s
+[rank 0] ar_pred warmup1 0.04s
+[rank 1] ar_pred it0 40.29 ms
+[rank 0] ar_pred it0 40.25 ms
+[rank 1] ar_pred it1 39.58 ms
+[rank 0] ar_pred it1 39.63 ms
+[rank 1] ar_pred it2 40.46 ms
+[rank 0] ar_pred it2 40.41 ms
+[rank 1] ar_pred it3 42.44 ms
+[rank 0] ar_pred it3 42.50 ms
+[rank 0] ar_pred it4 41.54 ms
+[rank 1] ar_pred it4 41.59 ms
+[rank 0] ==> p2_pred_carrier p50 40.41 ms corr_md=2.44e-04
+[rank 1] ==> p2_pred_carrier p50 40.46 ms corr_md=2.44e-04
+[rank 0] ar_rccl_seq warmup0 0.02s
+[rank 1] ar_rccl_seq warmup0 0.02s
+[rank 0] ar_rccl_seq warmup1 0.02s
+[rank 1] ar_rccl_seq warmup1 0.02s
+[rank 0] ar_rccl_seq it0 15.42 ms
+[rank 1] ar_rccl_seq it0 15.42 ms
+[rank 0] ar_rccl_seq it1 15.76 ms
+[rank 1] ar_rccl_seq it1 15.74 ms
+[rank 0] ar_rccl_seq it2 15.32 ms
+[rank 1] ar_rccl_seq it2 15.32 ms
+[rank 0] ar_rccl_seq it3 15.75 ms
+[rank 1] ar_rccl_seq it3 15.74 ms
+[rank 0] ar_rccl_seq it4 15.37 ms
+[rank 1] ar_rccl_seq it4 15.38 ms
+[rank 0] ==> rccl_seq p50 15.42 ms corr_md=2.44e-04
+[rank 1] ==> rccl_seq p50 15.42 ms corr_md=2.44e-04
+[rank 1] ar DONE
+wrote /root/private_data/tri-dist-hygon/bench/results/s18_ar_29568.json
+[rank 0] ===== ar @ M8192 N29568 K8192 (p50 ms) =====
+  gemm_torch                10.92
+  base_s6                   42.05
+  p1_rd                     39.89
+  p2_pred_carrier           40.41
+  rccl_seq                  15.42
+[rank 0] ar DONE
+--------------------------------------------------------------------------
+prterun noticed that process rank 1 with PID 8087 on node crdnotebook-2108920543976423425-abc12335-94521 exited on
+signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+## ar rc=139 12:41:53
+########## rs 12:41:53 ##########
+[rank 0] fam=rs dist ready
+[rank 1] fam=rs dist ready
+[rank 1] ref built 3.1s (2.5GB peak)
+[rank 1] gemm_torch warmup0 0.43s
+[rank 1] gemm_torch warmup1 0.01s
+[rank 1] gemm_torch it0 11.11 ms
+[rank 1] gemm_torch it1 10.93 ms
+[rank 1] gemm_torch it2 10.98 ms
+[rank 1] gemm_torch it3 11.05 ms
+[rank 1] gemm_torch it4 10.93 ms
+[rank 1] ==> gemm_torch p50 10.98 ms corr_md=-1.00e+00
+[rank 0] ref built 3.6s (2.5GB peak)
+[rank 0] gemm_torch warmup0 0.43s
+[rank 0] gemm_torch warmup1 0.01s
+[rank 0] gemm_torch it0 11.21 ms
+[rank 0] gemm_torch it1 10.95 ms
+[rank 0] gemm_torch it2 11.01 ms
+[rank 0] gemm_torch it3 11.10 ms
+[rank 0] gemm_torch it4 11.04 ms
+[rank 0] ==> gemm_torch p50 11.04 ms corr_md=-1.00e+00
+[rank 1] ==> base_s6 SKIP:
+Traceback (most recent call last):
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 129, in arm
+    r = setup_fn()
+        ^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 250, in a_s6
+    c6 = s6rs.gemm_rs_intra_node_op(a, b, DTYPE, rank, size, ctx)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/gemm_reduce_scatter.py", line 235, in gemm_rs_intra_node_op
+    matmul_local(a, b, ctx.scratch)
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/gemm_reduce_scatter.py", line 153, in matmul_local
+    assert M % alignment == 0 and N % alignment == 0 and K % alignment == 0
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+[rank 0] ==> base_s6 SKIP:
+Traceback (most recent call last):
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 129, in arm
+    r = setup_fn()
+        ^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 250, in a_s6
+    c6 = s6rs.gemm_rs_intra_node_op(a, b, DTYPE, rank, size, ctx)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/gemm_reduce_scatter.py", line 235, in gemm_rs_intra_node_op
+    matmul_local(a, b, ctx.scratch)
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/gemm_reduce_scatter.py", line 153, in matmul_local
+    assert M % alignment == 0 and N % alignment == 0 and K % alignment == 0
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+[rank 0] rs_v5 warmup0 0.03s
+[rank 1] rs_v5 warmup0 0.03s
+[rank 1] rs_v5 warmup1 0.03s
+[rank 0] rs_v5 warmup1 0.03s
+[rank 1] rs_v5 it0 31.88 ms
+[rank 0] rs_v5 it0 31.91 ms
+[rank 1] rs_v5 it1 31.98 ms
+[rank 0] rs_v5 it1 32.10 ms
+[rank 1] rs_v5 it2 32.28 ms
+[rank 0] rs_v5 it2 32.44 ms
+[rank 0] rs_v5 it3 32.31 ms
+[rank 1] rs_v5 it3 32.29 ms
+[rank 1] rs_v5 it4 32.27 ms
+[rank 0] rs_v5 it4 32.47 ms
+[rank 0] ==> p1_v5 p50 32.31 ms corr_md=2.44e-04
+[rank 1] ==> p1_v5 p50 32.27 ms corr_md=1.22e-04
+[rank 0] rs_rccl_seq warmup0 0.01s
+[rank 1] rs_rccl_seq warmup0 0.01s
+[rank 0] rs_rccl_seq warmup1 0.01s
+[rank 1] rs_rccl_seq warmup1 0.01s
+[rank 1] rs_rccl_seq it0 13.86 ms
+[rank 0] rs_rccl_seq it0 14.13 ms
+[rank 0] rs_rccl_seq it1 13.47 ms
+[rank 1] rs_rccl_seq it1 13.47 ms
+[rank 0] rs_rccl_seq it2 14.42 ms
+[rank 1] rs_rccl_seq it2 14.41 ms
+[rank 0] rs_rccl_seq it3 14.27 ms
+[rank 1] rs_rccl_seq it3 14.23 ms
+[rank 0] rs_rccl_seq it4 13.72 ms
+[rank 1] rs_rccl_seq it4 13.72 ms
+[rank 0] ==> rccl_seq p50 14.13 ms corr_md=2.44e-04
+[rank 1] ==> rccl_seq p50 13.86 ms corr_md=2.44e-04
+[rank 1] rs DONE
+wrote /root/private_data/tri-dist-hygon/bench/results/s18_rs_29568.json
+[rank 0] ===== rs @ M8192 N29568 K8192 (p50 ms) =====
+  gemm_torch                11.04
+  base_s6                SKIP
+  p1_v5                     32.31
+  rccl_seq                  14.13
+[rank 0] rs DONE
+--------------------------------------------------------------------------
+prterun noticed that process rank 1 with PID 9898 on node crdnotebook-2108920543976423425-abc12335-94521 exited on
+signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+## rs rc=139 12:42:21
+########## ag 12:42:21 ##########
+[rank 0] fam=ag dist ready
+[rank 1] fam=ag dist ready
+[rank 0] ref built 3.0s (2.5GB peak)
+[rank 0] AG tensors ready (4.8GB)
+[rank 0] gemm_torch warmup0 0.02s
+[rank 0] gemm_torch warmup1 0.01s
+[rank 0] gemm_torch it0 11.26 ms
+[rank 1] ref built 3.9s (2.5GB peak)
+[rank 0] gemm_torch it1 11.16 ms
+[rank 0] gemm_torch it2 10.97 ms
+[rank 0] gemm_torch it3 10.94 ms
+[rank 0] gemm_torch it4 10.90 ms
+[rank 0] ==> gemm_torch p50 10.97 ms corr_md=-1.00e+00
+[rank 1] AG tensors ready (4.8GB)
+[rank 1] gemm_torch warmup0 0.02s
+[rank 1] gemm_torch warmup1 0.01s
+[rank 1] gemm_torch it0 10.97 ms
+[rank 1] gemm_torch it1 10.92 ms
+[rank 1] gemm_torch it2 10.95 ms
+[rank 1] gemm_torch it3 10.97 ms
+[rank 1] gemm_torch it4 11.03 ms
+[rank 1] ==> gemm_torch p50 10.97 ms corr_md=-1.00e+00
+[rank 0] ag_push warmup0 1.91s
+[rank 1] ag_push warmup0 1.65s
+[rank 0] ag_push warmup1 0.04s
+[rank 1] ag_push warmup1 0.04s
+[rank 0] ag_push it0 37.74 ms
+[rank 1] ag_push it0 37.62 ms
+[rank 0] ag_push it1 37.57 ms
+[rank 1] ag_push it1 37.46 ms
+[rank 0] ag_push it2 37.40 ms
+[rank 1] ag_push it2 37.53 ms
+[rank 0] ag_push it3 37.52 ms
+[rank 1] ag_push it3 37.62 ms
+[rank 0] ag_push it4 37.79 ms
+[rank 1] ag_push it4 37.55 ms
+[rank 0] ==> base_push_s11 p50 37.57 ms corr_md=1.22e-04
+[rank 1] ==> base_push_s11 p50 37.55 ms corr_md=1.22e-04
+[rank 0] ag_tr warmup0 0.05s
+[rank 1] ag_tr warmup0 0.04s
+[rank 0] ag_tr warmup1 0.04s
+[rank 1] ag_tr warmup1 0.04s
+[rank 0] ag_tr it0 41.15 ms
+[rank 1] ag_tr it0 40.99 ms
+[rank 0] ag_tr it1 41.32 ms
+[rank 1] ag_tr it1 41.73 ms
+[rank 0] ag_tr it2 41.43 ms
+[rank 1] ag_tr it2 41.63 ms
+[rank 1] ag_tr it3 39.04 ms
+[rank 0] ag_tr it3 42.33 ms
+[rank 1] ag_tr it4 41.23 ms
+[rank 1] ==> p1_tr_s14 p50 41.23 ms corr_md=1.22e-04
+[rank 0] ag_tr it4 41.07 ms
+[rank 0] ==> p1_tr_s14 p50 41.32 ms corr_md=1.22e-04
+[rank 1] ag_i1_v0 warmup0 0.07s
+[rank 0] ag_i1_v0 warmup0 0.05s
+[rank 1] ag_i1_v0 warmup1 0.05s
+[rank 0] ag_i1_v0 warmup1 0.05s
+[rank 0] ag_i1_v0 it0 45.72 ms
+[rank 1] ag_i1_v0 it0 47.00 ms
+[rank 1] ag_i1_v0 it1 43.44 ms
+[rank 0] ag_i1_v0 it1 44.82 ms
+[rank 1] ag_i1_v0 it2 45.56 ms
+[rank 0] ag_i1_v0 it2 45.87 ms
+[rank 1] ag_i1_v0 it3 45.00 ms
+[rank 0] ag_i1_v0 it3 45.39 ms
+[rank 1] ag_i1_v0 it4 44.77 ms
+[rank 1] ==> p2_i1_noverify p50 45.00 ms corr_md=1.22e-04
+[rank 0] ag_i1_v0 it4 45.32 ms
+[rank 0] ==> p2_i1_noverify p50 45.39 ms corr_md=1.22e-04
+[rank 1] ag_i1_v1 warmup0 0.06s
+[rank 0] ag_i1_v1 warmup0 0.05s
+[rank 1] ag_i1_v1 warmup1 0.05s
+[rank 0] ag_i1_v1 warmup1 0.05s
+[rank 1] ag_i1_v1 it0 46.87 ms
+[rank 0] ag_i1_v1 it0 47.23 ms
+[rank 1] ag_i1_v1 it1 46.93 ms
+[rank 0] ag_i1_v1 it1 46.77 ms
+[rank 1] ag_i1_v1 it2 47.19 ms
+[rank 0] ag_i1_v1 it2 45.83 ms
+[rank 1] ag_i1_v1 it3 46.84 ms
+[rank 0] ag_i1_v1 it3 46.41 ms
+[rank 0] ag_i1_v1 it4 46.13 ms
+[rank 0] ==> p2_i1_verify p50 46.41 ms corr_md=1.22e-04
+[rank 1] ag_i1_v1 it4 48.30 ms
+[rank 1] ==> p2_i1_verify p50 46.93 ms corr_md=1.22e-04
+## ag rc=1 12:48:45
+########## a2a 12:48:46 ##########
+Abort is in progress...hit ctrl-c again to forcibly terminate
+
+Abort is in progress...hit ctrl-c again to forcibly terminate
+
+## a2a rc=1 12:48:47
+########## ag-redo 12:49:18 ##########
+[rank 0] fam=ag dist ready
+[rank 1] fam=ag dist ready
+[rank 0] ref built 3.3s (2.5GB peak)
+[rank 1] ref built 3.6s (2.5GB peak)
+[rank 0] AG tensors ready (4.8GB) chunk_rows=512 n_chunks=8
+[rank 1] AG tensors ready (4.8GB) chunk_rows=512 n_chunks=8
+[rank 1] gemm_torch warmup0 0.02s
+[rank 0] gemm_torch warmup0 0.02s
+[rank 1] gemm_torch warmup1 0.01s
+[rank 0] gemm_torch warmup1 0.01s
+[rank 1] gemm_torch it0 10.95 ms
+[rank 0] gemm_torch it0 11.22 ms
+[rank 1] gemm_torch it1 10.91 ms
+[rank 0] gemm_torch it1 11.00 ms
+[rank 1] gemm_torch it2 10.93 ms
+[rank 0] gemm_torch it2 11.00 ms
+[rank 1] gemm_torch it3 10.93 ms
+[rank 0] gemm_torch it3 10.89 ms
+[rank 1] gemm_torch it4 10.99 ms
+[rank 1] ==> gemm_torch p50 10.93 ms corr_md=-1.00e+00
+[rank 0] gemm_torch it4 10.94 ms
+[rank 0] ==> gemm_torch p50 11.00 ms corr_md=-1.00e+00
+[rank 0] ag_push warmup0 0.07s
+[rank 1] ag_push warmup0 0.05s
+[rank 1] ag_push warmup1 0.04s
+[rank 0] ag_push warmup1 0.04s
+[rank 0] ag_push it0 37.46 ms
+[rank 1] ag_push it0 37.57 ms
+[rank 1] ag_push it1 37.39 ms
+[rank 0] ag_push it1 37.50 ms
+[rank 1] ag_push it2 37.50 ms
+[rank 0] ag_push it2 37.66 ms
+[rank 1] ag_push it3 37.44 ms
+[rank 0] ag_push it3 37.47 ms
+[rank 1] ag_push it4 37.56 ms
+[rank 1] ==> base_push_s11 p50 37.50 ms corr_md=1.22e-04
+[rank 0] ag_push it4 37.48 ms
+[rank 0] ==> base_push_s11 p50 37.48 ms corr_md=1.22e-04
+[rank 1] ag_tr warmup0 0.04s
+[rank 0] ag_tr warmup0 0.04s
+[rank 1] ag_tr warmup1 0.04s
+[rank 0] ag_tr warmup1 0.04s
+[rank 0] ag_tr it0 40.37 ms
+[rank 1] ag_tr it0 41.41 ms
+[rank 1] ag_tr it1 40.55 ms
+[rank 0] ag_tr it1 41.60 ms
+[rank 1] ag_tr it2 41.18 ms
+[rank 0] ag_tr it2 40.92 ms
+[rank 0] ag_tr it3 40.40 ms
+[rank 1] ag_tr it3 41.60 ms
+[rank 0] ag_tr it4 41.74 ms
+[rank 0] ==> p1_tr_s14 p50 40.92 ms corr_md=1.22e-04
+[rank 1] ag_tr it4 40.96 ms
+[rank 1] ==> p1_tr_s14 p50 41.18 ms corr_md=1.22e-04
+[rank 1] ag_i1_v0 warmup0 0.05s
+[rank 0] ag_i1_v0 warmup0 0.05s
+[rank 1] ag_i1_v0 warmup1 0.05s
+[rank 0] ag_i1_v0 warmup1 0.05s
+[rank 1] ag_i1_v0 it0 44.31 ms
+[rank 0] ag_i1_v0 it0 44.27 ms
+[rank 1] ag_i1_v0 it1 44.17 ms
+[rank 0] ag_i1_v0 it1 44.35 ms
+[rank 1] ag_i1_v0 it2 44.77 ms
+[rank 0] ag_i1_v0 it2 47.36 ms
+[rank 1] ag_i1_v0 it3 47.05 ms
+[rank 0] ag_i1_v0 it3 43.92 ms
+[rank 1] ag_i1_v0 it4 46.85 ms
+[rank 1] ==> p2_i1_noverify p50 44.77 ms corr_md=1.22e-04
+[rank 0] ag_i1_v0 it4 46.17 ms
+[rank 0] ==> p2_i1_noverify p50 44.35 ms corr_md=1.22e-04
+[rank 1] ag_i1_v1 warmup0 0.22s
+[rank 0] ag_i1_v1 warmup0 0.05s
+[rank 1] ag_i1_v1 warmup1 0.05s
+[rank 0] ag_i1_v1 warmup1 0.05s
+[rank 1] ag_i1_v1 it0 48.02 ms
+[rank 0] ag_i1_v1 it0 46.66 ms
+[rank 1] ag_i1_v1 it1 46.51 ms
+[rank 0] ag_i1_v1 it1 49.72 ms
+[rank 1] ag_i1_v1 it2 49.93 ms
+[rank 0] ag_i1_v1 it2 47.81 ms
+[rank 1] ag_i1_v1 it3 48.85 ms
+[rank 0] ag_i1_v1 it3 47.22 ms
+[rank 1] ag_i1_v1 it4 46.41 ms
+[rank 1] ==> p2_i1_verify p50 48.02 ms corr_md=1.22e-04
+[rank 0] ag_i1_v1 it4 47.04 ms
+[rank 0] ==> p2_i1_verify p50 47.22 ms corr_md=1.22e-04
+[rank 1] gemm_triton warmup0 0.04s
+[rank 0] gemm_triton warmup0 0.04s
+[rank 1] gemm_triton warmup1 0.04s
+[rank 0] gemm_triton warmup1 0.04s
+[rank 1] gemm_triton it0 39.77 ms
+[rank 0] gemm_triton it0 39.64 ms
+[rank 1] gemm_triton it1 39.81 ms
+[rank 0] gemm_triton it1 39.86 ms
+[rank 1] gemm_triton it2 39.38 ms
+[rank 0] gemm_triton it2 39.60 ms
+[rank 1] gemm_triton it3 40.39 ms
+[rank 0] gemm_triton it3 39.09 ms
+[rank 1] gemm_triton it4 40.47 ms
+[rank 1] ==> gemm_triton p50 39.81 ms corr_md=-1.00e+00
+[rank 0] gemm_triton it4 38.77 ms
+[rank 0] ==> gemm_triton p50 39.60 ms corr_md=-1.00e+00
+[rank 0] rccl_ag warmup0 0.00s
+[rank 1] rccl_ag warmup0 0.24s
+[rank 0] rccl_ag warmup1 0.00s
+[rank 1] rccl_ag warmup1 0.00s
+[rank 0] rccl_ag it0 0.80 ms
+[rank 1] rccl_ag it0 0.79 ms
+[rank 0] rccl_ag it1 0.80 ms
+[rank 1] rccl_ag it1 0.80 ms
+[rank 0] rccl_ag it2 0.81 ms
+[rank 1] rccl_ag it2 0.80 ms
+[rank 0] rccl_ag it3 0.81 ms
+[rank 1] rccl_ag it3 0.79 ms
+[rank 0] rccl_ag it4 0.79 ms
+[rank 1] rccl_ag it4 0.80 ms
+[rank 1] rccl_seq warmup0 0.01s
+[rank 0] rccl_seq warmup0 0.01s
+[rank 1] rccl_seq warmup1 0.01s
+[rank 0] rccl_seq warmup1 0.01s
+[rank 0] rccl_seq it0 11.74 ms
+[rank 1] rccl_seq it0 11.95 ms
+[rank 0] rccl_seq it1 11.80 ms
+[rank 1] rccl_seq it1 12.04 ms
+[rank 0] rccl_seq it2 12.01 ms
+[rank 1] rccl_seq it2 12.04 ms
+[rank 1] rccl_seq it3 11.69 ms
+[rank 0] rccl_seq it3 12.17 ms
+[rank 0] rccl_seq it4 11.91 ms
+[rank 0] ==> rccl_seq p50 11.91 ms corr_md=1.22e-04
+[rank 1] rccl_seq it4 12.27 ms
+[rank 1] ==> rccl_seq p50 12.04 ms corr_md=1.22e-04
+[rank 1] ag DONE
+wrote /root/private_data/tri-dist-hygon/bench/results/s18_ag_29568.json
+[rank 0] ===== ag @ M8192 N29568 K8192 (p50 ms) =====
+  gemm_torch                11.00
+  base_push_s11             37.48
+  p1_tr_s14                 40.92
+  p2_i1_noverify            44.35
+  p2_i1_verify              47.22
+  gemm_triton               39.60
+  rccl_seq                  11.91
+[rank 0] ag DONE
+--------------------------------------------------------------------------
+prterun noticed that process rank 1 with PID 13749 on node crdnotebook-2108920543976423425-abc12335-94521 exited on
+signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+## ag rc=139 12:49:46
+########## a2a-redo 12:49:46 ##########
+[rank 1] fam=a2a dist ready
+[rank 0] fam=a2a dist ready
+[rank 0] ==> base_moe_a2a SKIP:
+Traceback (most recent call last):
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 130, in arm
+    r = setup_fn()
+        ^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 414, in a_a2a
+    ctx = moe_a2a.create_moe_a2a_intra_node_context(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/moe_a2a.py", line 336, in create_moe_a2a_intra_node_context
+    recv_ptr = s["host"].malloc(max_recv_rows * row_bytes)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/pydushmem/host.py", line 240, in malloc
+    return self._require_addr(self.lib.dushmem_malloc(size), "malloc")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/pydushmem/host.py", line 253, in _require_addr
+    assert addr, f"dushmem_{what} returned NULL"
+           ^^^^
+AssertionError: dushmem_malloc returned NULL
+
+[rank 1] ==> base_moe_a2a SKIP:
+Traceback (most recent call last):
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 130, in arm
+    r = setup_fn()
+        ^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/bench/s18_bench_unified.py", line 414, in a_a2a
+    ctx = moe_a2a.create_moe_a2a_intra_node_context(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/triton_dist/kernels/dcu/moe_a2a.py", line 336, in create_moe_a2a_intra_node_context
+    recv_ptr = s["host"].malloc(max_recv_rows * row_bytes)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/pydushmem/host.py", line 240, in malloc
+    return self._require_addr(self.lib.dushmem_malloc(size), "malloc")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/private_data/tri-dist-hygon/pydushmem/host.py", line 253, in _require_addr
+    assert addr, f"dushmem_{what} returned NULL"
+           ^^^^
+AssertionError: dushmem_malloc returned NULL
+
+[rank 0] a2a_rccl_2x warmup0 0.07s
+[rank 1] a2a_rccl_2x warmup0 0.09s
+[rank 0] a2a_rccl_2x warmup1 0.05s
+[rank 1] a2a_rccl_2x warmup1 0.05s
+[rank 0] a2a_rccl_2x it0 47.00 ms
+[rank 1] a2a_rccl_2x it0 46.98 ms
+[rank 0] a2a_rccl_2x it1 46.79 ms
+[rank 1] a2a_rccl_2x it1 46.78 ms
+[rank 0] a2a_rccl_2x it2 46.76 ms
+[rank 1] a2a_rccl_2x it2 46.76 ms
+[rank 0] a2a_rccl_2x it3 46.87 ms
+[rank 1] a2a_rccl_2x it3 46.87 ms
+[rank 0] a2a_rccl_2x it4 46.85 ms
+[rank 1] a2a_rccl_2x it4 46.85 ms
+[rank 0] ==> rccl_2xa2a p50 46.85 ms corr_md=-1.00e+00
+[rank 1] ==> rccl_2xa2a p50 46.85 ms corr_md=-1.00e+00
+[rank 1] a2a DONE
+wrote /root/private_data/tri-dist-hygon/bench/results/s18_a2a_29568.json
+[rank 0] ===== a2a @ M8192 N29568 K8192 (p50 ms) =====
+  base_moe_a2a           SKIP
+  rccl_2xa2a                46.85
+[rank 0] a2a DONE
+--------------------------------------------------------------------------
+prterun noticed that process rank 0 with PID 15507 on node crdnotebook-2108920543976423425-abc12335-94521 exited on
+signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+## a2a rc=139 12:50:08
+########## a2a-topk2 12:51:41 ##########
+[rank 1] fam=a2a dist ready
+[rank 0] fam=a2a dist ready
+[rank 0] a2a_full warmup0 0.00s
+[rank 1] a2a_full warmup0 0.02s
+[rank 0] a2a_full warmup1 0.00s
+[rank 1] a2a_full warmup1 0.00s
+[rank 0] a2a_full it0 3.68 ms
+[rank 1] a2a_full it0 3.68 ms
+[rank 0] a2a_full it1 3.69 ms
+[rank 1] a2a_full it1 3.68 ms
+[rank 0] a2a_full it2 3.70 ms
+[rank 1] a2a_full it2 3.69 ms
+[rank 0] a2a_full it3 3.68 ms
+[rank 1] a2a_full it3 3.68 ms
+[rank 0] a2a_full it4 3.69 ms
+[rank 1] a2a_full it4 3.69 ms
+[rank 0] a2a_dispatch warmup0 0.00s
+[rank 1] a2a_dispatch warmup0 0.00s
+[rank 0] a2a_dispatch warmup1 0.00s
+[rank 1] a2a_dispatch warmup1 0.00s
+[rank 0] a2a_dispatch it0 1.68 ms
+[rank 1] a2a_dispatch it0 1.69 ms
+[rank 0] a2a_dispatch it1 1.70 ms
+[rank 1] a2a_dispatch it1 1.69 ms
+[rank 0] a2a_dispatch it2 1.71 ms
+[rank 1] a2a_dispatch it2 1.70 ms
+[rank 0] a2a_dispatch it3 1.70 ms
+[rank 1] a2a_dispatch it3 1.69 ms
+[rank 0] a2a_dispatch it4 1.70 ms
+[rank 1] a2a_dispatch it4 1.69 ms
+[rank 0] a2a_combine warmup0 0.00s
+[rank 1] a2a_combine warmup0 0.00s
+[rank 0] a2a_combine warmup1 0.00s
+[rank 1] a2a_combine warmup1 0.00s
+[rank 0] a2a_combine it0 1.40 ms
+[rank 1] a2a_combine it0 1.42 ms
+[rank 0] a2a_combine it1 1.42 ms
+[rank 1] a2a_combine it1 1.44 ms
+[rank 0] a2a_combine it2 1.45 ms
+[rank 1] a2a_combine it2 1.44 ms
+[rank 0] a2a_combine it3 1.44 ms
+[rank 1] a2a_combine it3 1.43 ms
+[rank 0] a2a_combine it4 1.44 ms
+[rank 0] ==> base_moe_a2a p50 3.69 ms corr_md=0.00e+00
+[rank 1] a2a_combine it4 1.44 ms
+[rank 1] ==> base_moe_a2a p50 3.68 ms corr_md=0.00e+00
+[rank 1] a2a_rccl_2x warmup0 0.04s
+[rank 0] a2a_rccl_2x warmup0 0.04s
+[rank 0] a2a_rccl_2x warmup1 0.01s
+[rank 1] a2a_rccl_2x warmup1 0.01s
+[rank 0] a2a_rccl_2x it0 11.99 ms
+[rank 1] a2a_rccl_2x it0 11.99 ms
+[rank 0] a2a_rccl_2x it1 11.91 ms
+[rank 1] a2a_rccl_2x it1 11.89 ms
+[rank 0] a2a_rccl_2x it2 11.88 ms
+[rank 1] a2a_rccl_2x it2 11.86 ms
+[rank 0] a2a_rccl_2x it3 11.95 ms
+[rank 1] a2a_rccl_2x it3 11.93 ms
+[rank 0] a2a_rccl_2x it4 11.97 ms
+[rank 1] a2a_rccl_2x it4 11.97 ms
+[rank 0] ==> rccl_2xa2a p50 11.95 ms corr_md=-1.00e+00
+[rank 1] ==> rccl_2xa2a p50 11.93 ms corr_md=-1.00e+00
+[rank 1] a2a DONE
+wrote /root/private_data/tri-dist-hygon/bench/results/s18_a2a_29568.json
+[rank 0] ===== a2a @ M8192 N29568 K8192 (p50 ms) =====
+  base_moe_a2a               3.69
+  rccl_2xa2a                11.95
+[rank 0] a2a DONE
+--------------------------------------------------------------------------
+prterun noticed that process rank 1 with PID 15718 on node crdnotebook-2108920543976423425-abc12335-94521 exited on
+signal 11 (Segmentation fault).
+--------------------------------------------------------------------------
+## a2a rc=139 12:52:03
