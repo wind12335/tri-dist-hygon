@@ -44,6 +44,9 @@ grid 封顶 128 是为了给 pull lanes/observer 留 CU）同法重构：
 
 ## 遗留
 
+- s19g（constexpr 折叠 world_size/rank/m_chunk_num）：25.55/27.12 vs 参考 26.18，
+  两相同臂自身差 1.6ms = 纯噪声，**无收益**——swizzle 除法链每 CTA 只跑一次，
+  被 128 次 k 迭代摊薄。不改生产 kernel。
 - 满格形态仍比 plain 慢 4-5ms（25.9 vs 21.1）——剩余 = 门控/swizzle 语义 +
   重构后剩余结构，待 2 卡 A/B 后再决定是否继续剥。
 - 2 卡最终 A/B + 600 轮 soak（验收纪律）待卡。
